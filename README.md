@@ -31,35 +31,35 @@
   <table>
     <tr>
       <td align="center">
-        <img src="assets/indoor_fruit_410_510.gif" alt="Example 1" width="300"/>
+        <img src="assets/indoor_fruit_410_510.gif" alt="Example 1" width="200"/>
       </td>
       <td align="center">
-        <img src="assets/indoor_fruit_guobao2_5_155.gif" alt="Example 2" width="300"/>
+        <img src="assets/indoor_fruit_guobao2_5_155.gif" alt="Example 2" width="200"/>
       </td>
       <td align="center">
-        <img src="assets/indoor_hand_move_dynamic2_300_400.gif" alt="Example 3" width="300"/>
-      </td>
-    </tr>
-    <tr>
-      <td align="center">
-        <img src="assets/outdoor_day2-1_317_417.gif" alt="Example 4" width="300"/>
-      </td>
-      <td align="center">
-        <img src="assets/toulan_360_460.gif" alt="Example 5" width="300"/>
-      </td>
-      <td align="center">
-        <img src="assets/11_180_380.gif" alt="Example 6" width="300"/>
+        <img src="assets/indoor_hand_move_dynamic2_300_400.gif" alt="Example 3" width="200"/>
       </td>
     </tr>
     <tr>
       <td align="center">
-        <img src="assets/3_143_243.gif" alt="Example 7" width="300"/>
+        <img src="assets/outdoor_day2-1_317_417.gif" alt="Example 4" width="200"/>
       </td>
       <td align="center">
-        <img src="assets/peanuts_light_160_386.gif" alt="Example 8" width="300"/>
+        <img src="assets/toulan_360_460.gif" alt="Example 5" width="200"/>
       </td>
       <td align="center">
-        <img src="assets/peanuts_running_2360_2460.gif" alt="Example 9" width="300"/>
+        <img src="assets/11_180_380.gif" alt="Example 6" width="200"/>
+      </td>
+    </tr>
+    <tr>
+      <td align="center">
+        <img src="assets/3_143_243.gif" alt="Example 7" width="200"/>
+      </td>
+      <td align="center">
+        <img src="assets/peanuts_light_160_386.gif" alt="Example 8" width="200"/>
+      </td>
+      <td align="center">
+        <img src="assets/peanuts_running_2360_2460.gif" alt="Example 9" width="200"/>
       </td>
     </tr>
   </table>
