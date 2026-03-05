@@ -1,0 +1,56 @@
+# Configuration file for EDS and EC dataset evaluation
+
+# Dataset paths
+dataset_dir: "/media/ljx/ljx"
+ckpt_root: "/home/ljx/code/FE-TAP2/checkpoints/kubric_new/fe-ts-unet-s4-v6-4-fe-basic/model_final.pth"
+
+# Test sequences
+eval_datasets_eds:
+  - "peanuts_light_160_386"
+  - "rocket_earth_light_338_438"
+  - "ziggy_in_the_arena_1350_1650"
+  - "peanuts_running_2360_2460"
+
+eval_datasets_ec:
+  # - "shapes_translation_8_88"
+  # - "shapes_rotation_165_245"
+  # - "shapes_6dof_485_565"
+  # - "boxes_translation_330_410"
+  # - "boxes_rotation_198_278"
+
+# Model configuration
+representation: "time_surfaces_v2_5_new"
+stride: 4
+corr_levels: 3
+backbone: "transformer_unet"
+window_size: 16
+corr_radius: 3
+hidden_size: 384
+space_depth: 3
+time_depth: 3
+
+# Evaluation settings
+eds:
+  dt: 0.005
+  grid_size: 0
+  n_iters: 3
+
+ec:
+  dt: 0.010
+  event_template_type: "sobel"
+  grid_size: 5
+  n_iters: 6
+
+# Visualization and output settings
+visualization:
+  enable: false  # Set to true to enable visualization
+  fps: 50  # FPS for EDS videos
+  fps_ec: 10  # FPS for EC videos
+
+output:
+  save_results: false  # Set to true to save results
+  save_trajectory: false  # Set to true to save trajectory files
+  base_dir: "output/eval"  # Base directory for outputs
+  eds_dir: "output/eval_eds_subseq"  # Directory for EDS outputs
+  ec_dir: "output/eval_ec_subseq"  # Directory for EC outputs
+

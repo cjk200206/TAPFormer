@@ -1,0 +1,39 @@
+# Core dependencies
+torch>=1.8.0
+torchvision>=0.9.0
+numpy>=1.19.0
+
+# Configuration
+PyYAML>=5.4.0
+
+# Image and video processing
+opencv-python>=4.5.0
+imageio>=2.9.0
+imageio-ffmpeg>=0.4.0
+Pillow>=8.0.0
+
+# Deep learning utilities
+einops>=0.3.0
+timm>=0.4.0
+
+# Data processing
+h5py>=3.1.0
+hdf5plugin>=3.0.0
+pandas>=1.2.0
+
+# Visualization
+matplotlib>=3.3.0
+moviepy>=1.0.3
+# flow-vis: Install from GitHub if not available on PyPI
+# pip install git+https://github.com/tomrunia/OpticalFlow_Visualization.git
+
+# Utilities
+tqdm>=4.60.0
+scipy>=1.6.0
+
+# Optional: Configuration management (if used)
+omegaconf>=2.1.0
+
+# Optional: For some dataset processing
+scikit-image>=0.18.0
+
