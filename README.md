@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://arxiv.org/abs/2602.04877"><img src="https://img.shields.io/badge/arXiv-FETAP-b31b1b" alt="arXiv"></a>
-  <a href="https://arxiv.org/abs/2602.04877"><img src="https://img.shields.io/badge/arXiv-TAPFormer-b31b1b" alt="arXiv"></a>
+  <a href="https://arxiv.org/pdf/2603.04989"><img src="https://img.shields.io/badge/arXiv-TAPFormer-b31b1b" alt="arXiv"></a>
   <a href="https://tapformer.github.io/"><img src="https://img.shields.io/badge/🌐-Project_Page-orange" alt="Project Page"></a>
   <a href="https://github.com/facebookresearch/cowtracker"><img src="https://img.shields.io/badge/📦-Dataset-blue" alt="Dataset"></a>
 </p>
@@ -102,7 +102,7 @@ Note: If you encounter issues with `flow-vis`, it's only needed for optical flow
 ## Quick Start
 
 ### 1. Test Sequences and Pretrained Weights
-We build the first benchmark for multimodal arbitrary point tracking, including a synthetic frame–event training set and manually annotated real-world [test sequences](https://drive.google.com/file/d/1IYuGp5jwkpmfzEVlMptFM0HtIwbP8KSs/view?usp=drive_link), providing a comprehensive platform for future research. We also evaluate our model on the feature point tracking benchmarks [EDS](https://download.ifi.uzh.ch/rpg/CVPR23_deep_ev_tracker/eds_subseq.zip) and [EC](https://download.ifi.uzh.ch/rpg/CVPR23_deep_ev_tracker/ec_subseq.zip). The updated EDS datasets ground truth annotations can be downloaded [here](https://drive.google.com/file/d/1w7uQm8AK1HVtNOnBg-wxoDw3QUPn8OVs/view?usp=drive_link).
+We build the first benchmark for multimodal arbitrary point tracking, including a synthetic frame–event training set and manually annotated real-world [test sequences](https://drive.google.com/file/d/1gvbQgS8tbVSaOtgAIryYcbDabzsDoUaE/view?usp=drive_link), providing a comprehensive platform for future research. We also evaluate our model on the feature point tracking benchmarks [EDS](https://download.ifi.uzh.ch/rpg/CVPR23_deep_ev_tracker/eds_subseq.zip) and [EC](https://download.ifi.uzh.ch/rpg/CVPR23_deep_ev_tracker/ec_subseq.zip). The updated EDS datasets ground truth annotations can be downloaded [here](https://drive.google.com/file/d/1w7uQm8AK1HVtNOnBg-wxoDw3QUPn8OVs/view?usp=drive_link).
 
 Furthermore, we also provide the [network weights]() trained on the FE-FastKub dataset
 
