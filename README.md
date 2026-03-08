@@ -187,6 +187,12 @@ Output files are saved in:
 If you use this code in your research, please cite:
 
 ```bibtex
+@article{liu2026tapformer,
+  title={TAPFormer: Robust Arbitrary Point Tracking via Transient Asynchronous Fusion of Frames and Events},
+  author={Liu, Jiaxiong and Tan, Zhen and Zhang, Jinpu and Zhou, Yi and Shen, Hui and Chen, Xieyuanli and Hu, Dewen},
+  journal={arXiv preprint arXiv:2603.04989},
+  year={2026}
+}
 @inproceedings{liu2025tracking,
   title={Tracking any point with frame-event fusion network at high frame rate},
   author={Liu, Jiaxiong and Wang, Bo and Tan, Zhen and Zhang, Jinpu and Shen, Hui and Hu, Dewen},
