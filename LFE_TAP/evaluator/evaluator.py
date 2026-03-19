@@ -5,7 +5,7 @@ import logging
 from tqdm import tqdm
 from typing import Optional, Mapping
 from torch.utils.tensorboard import SummaryWriter
-from LFE_TAP.models.tapfe import TAPFormer
+from LFE_TAP.models.tapformer import TAPFormer
 from LFE_TAP.utils.visualizer import Visualizer
 from LFE_TAP.utils.dataset_utils import dataclass_to_cuda_
 

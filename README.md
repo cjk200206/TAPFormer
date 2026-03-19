@@ -184,9 +184,9 @@ When enabled, the evaluation script generates:
 - **Result files**: Evaluation metrics (mean error, age, etc.)
 
 Output files are saved in:
-- EDS: `output/eval_eds_subseq/{sequence_name}/{model_name}/`
-- EC: `output/eval_ec_subseq/{sequence_name}/{model_name}/`
-- InivTAP and DrivTAP: `output/eval_InivTAP_DrivTAP_subseq/{sequence_name}/{model_name}/`
+- EDS: `output/eval_eds_subseq/{sequence_name}/`
+- EC: `output/eval_ec_subseq/{sequence_name}/`
+- InivTAP and DrivTAP: `output/eval_InivTAP_DrivTAP_subseq/{sequence_name}/`
 
 
 ## Citation

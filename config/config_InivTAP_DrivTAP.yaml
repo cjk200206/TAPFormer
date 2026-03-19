@@ -1,24 +1,27 @@
 # Configuration file for Aedat4 dataset evaluation
 
 # Dataset paths
-dataset_dir: "/home/ljx/code/FE-TAP2/data/seq_data"
-ckpt_root: "/home/ljx/code/FE-TAP2/checkpoints/kubric_new/fe-tsa-f1-s4-v6-4-fe-basic/model_final.pth"
+dataset_dir: "/media/ljx/ljx/data/TAPFormer_Dataset"
+ckpt_root: "/media/ljx/ljx/tapformer.pth"
 
 # Test sequences
-eval_datasets_aedat4:
-  - "indoor_fruit_410_510"
-  # - "indoor_fruit_dark_dynamic_170_270"
-  # - "indoor_fruit_guobao2_5_155"
-  # - "indoor_fruit_guobao_30_130"
-  # - "indoor_hand_move_dynamic2_300_400"
-  # - "outdoor_day2-1_317_417"
-  # - "outdoor_static_1210_1310"
-  # - "toulan_360_460"
-  # - "11_180_380"
-  # - "5_100_300"
-  # - "10_5_205"
-  # - "3_143_243"
-  # - "1_35_135"
+eval_datasets:
+  # InivTAP
+  - ["ID_Fast_Fruit", "InivTAP"]
+  - ["ID_Dark_Fruit", "InivTAP"]
+  - ["ID_Fast_Hand", "InivTAP"]
+  - ["ID_OverExp_Fruit", "InivTAP"]
+  - ["ID_OverExp_Fruit2", "InivTAP"]
+  - ["ID_Dynamic_Robot", "InivTAP"]
+  - ["OD_Dynamic", "InivTAP"]
+  - ["OD_Static", "InivTAP"]
+  - ["OD_Basketball", "InivTAP"]
+  # DrivTAP
+  - ["Day_Tunnel", "DrivTAP"]
+  - ["Day_Bridge", "DrivTAP"]
+  - ["Day_Fast", "DrivTAP"]
+  - ["Night_Road", "DrivTAP"]
+  - ["Night_Fast", "DrivTAP"]
 
 # Model configuration (auto-detected from checkpoint path if not specified)
 # If checkpoint path contains these strings, the corresponding config will be used
@@ -34,7 +37,6 @@ time_depth: 3
 
 # Evaluation settings
 dt: 0.0100
-event_template_type: "sobel"
 grid_size: 0
 n_iters: 5
 

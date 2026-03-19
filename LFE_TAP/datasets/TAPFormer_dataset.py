@@ -18,7 +18,6 @@ class TAPFormer_dataset(torch.utils.data.Dataset):
             for fname in os.listdir(data_root)
             if os.path.isdir(os.path.join(data_root, fname))
         ]
-        print("found %d unique seqences in %s" % (len(self.seq_names), self.data_root))
 
     def __getitem__(self, index):
         gotit =False

@@ -7,17 +7,15 @@ from LFE_TAP.utils.event.utils import read_input
 from LFE_TAP.utils.dataset_utils import FrameEventData_test
 
 class EC_dataset(torch.utils.data.Dataset):
-    def __init__(self, data_root, dt=0.0200, representation="time_surfaces_v2_5", event_template_type = "sobel"):
+    def __init__(self, data_root, dt=0.0200, representation="time_surfaces_v2_5"):
         self.data_root = data_root
         self.dt = dt
         self.representation = representation
-        self.event_template = event_template_type
         self.seq_names = [
             fname
             for fname in os.listdir(data_root)
             if os.path.isdir(os.path.join(data_root, fname))
         ]
-        print("found %d unique seqences in %s" % (len(self.seq_names), self.data_root))
 
     def __getitem__(self, index):
         gotit =False

@@ -3,7 +3,7 @@ import time
 import torch.nn.functional as F
 import numpy as np
 
-from LFE_TAP.models.tapfe import TAPFormer, posenc
+from LFE_TAP.models.tapformer import TAPFormer, posenc
 from LFE_TAP.utils.model_utils import get_track_feat, normalize_voxels
 from LFE_TAP.models.embeddings import get_1d_sincos_pos_embed_from_grid
 

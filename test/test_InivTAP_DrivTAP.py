@@ -45,8 +45,8 @@ config = load_config(args.config)
 # Extract configuration
 dataset_dir = config['dataset_dir']
 ckpt_root = config['ckpt_root']
+
 EVAL_DATASETS = config['eval_datasets']
-model_name = os.path.basename(os.path.dirname(ckpt_root))
 
 representation = config['representation']
 stride = config.get('stride')
@@ -72,7 +72,7 @@ output_cfg = config.get('output', {})
 enable_visualization = vis_cfg.get('enable', False)
 save_results = output_cfg.get('save_results', False)
 save_trajectory = output_cfg.get('save_trajectory', False)
-base_output_dir = output_cfg.get('base_dir', 'output/eval_aedat4_subseq')
+base_output_dir = output_cfg.get('base_dir', 'output/eval_InivTAP_DrivTAP_subseq')
 
 # ========== Model Initialization ==========
 print("Loading model...")
@@ -97,16 +97,20 @@ print("Model loaded successfully!")
 
 # ========== Evaluation ==========
 print("\n" + "="*50)
-print("Evaluating on Aedat4 dataset...")
+print("Evaluating on InivTAP and DrivTAP dataset...")
 print("="*50)
-datasets = TAPFormer_dataset(os.path.join(dataset_dir), representation=representation, dt=dt)
-for seq_name in EVAL_DATASETS:
-    sample, gotit = datasets.get_a_seq(seq_name)
+datasets_inivtap = TAPFormer_dataset(os.path.join(dataset_dir, "InivTAP"), representation=representation, dt=dt)
+datasets_drivtap = TAPFormer_dataset(os.path.join(dataset_dir, "DrivTAP"), representation=representation, dt=dt)
+for seq_name, dataset_type in EVAL_DATASETS:
+    if dataset_type == "InivTAP":
+        sample, gotit = datasets_inivtap.get_a_seq(seq_name)
+    elif dataset_type == "DrivTAP":
+        sample, gotit = datasets_drivtap.get_a_seq(seq_name)
     if not gotit:
         continue
     
     # Setup output directory
-    output_dir = os.path.join(base_output_dir, seq_name, model_name)
+    output_dir = os.path.join(base_output_dir, seq_name)
     if enable_visualization or save_results or save_trajectory:
         os.makedirs(output_dir, exist_ok=True)
     

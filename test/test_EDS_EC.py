@@ -48,8 +48,9 @@ config = load_config(args.config)
 # Extract configuration
 dataset_dir = config['dataset_dir']
 ckpt_root = config['ckpt_root']
-EVAL_DATASETS_EDS = config['eval_datasets_eds']
-EVAL_DATASETS_EC = config['eval_datasets_ec']
+
+EVAL_DATASETS_EDS = config.get('eval_datasets_eds') or []
+EVAL_DATASETS_EC = config.get('eval_datasets_ec') or []
 
 # Model configuration
 model_cfg = config
@@ -73,7 +74,6 @@ output_cfg = config.get('output', {})
 enable_visualization = vis_cfg.get('enable', False)
 save_results = output_cfg.get('save_results', False)
 save_trajectory = output_cfg.get('save_trajectory', False)
-model_name = os.path.basename(os.path.dirname(ckpt_root))
 
 # ========== Model Initialization ==========
 print("Loading model...")
@@ -108,7 +108,7 @@ for seq_name in EVAL_DATASETS_EDS:
         continue
     
     # Setup output directory
-    output_dir = os.path.join(output_cfg.get('eds_dir', 'output/eval_eds_subseq'), seq_name, model_name)
+    output_dir = os.path.join(output_cfg.get('eds_dir', 'output/eval_eds_subseq'), seq_name)
     if enable_visualization or save_results or save_trajectory:
         os.makedirs(output_dir, exist_ok=True)
     
@@ -206,15 +206,14 @@ print("\n" + "="*50)
 print("Evaluating on EC dataset...")
 print("="*50)
 fa, efa, t_l = [], [], []
-datasets = EC_dataset(os.path.join(dataset_dir, "ec_subseq"), representation=representation, 
-                      event_template_type=ec_cfg['event_template_type'], dt=ec_cfg['dt'])
+datasets = EC_dataset(os.path.join(dataset_dir, "ec_subseq"), representation=representation, dt=ec_cfg['dt'])
 for seq_name in EVAL_DATASETS_EC:
     sample, gotit = datasets.get_a_seq(seq_name)
     if not gotit:
         continue
     
     # Setup output directory
-    output_dir = os.path.join(output_cfg.get('ec_dir', 'output/eval_ec_subseq'), seq_name, model_name)
+    output_dir = os.path.join(output_cfg.get('ec_dir', 'output/eval_ec_subseq'), seq_name)
     if enable_visualization or save_results or save_trajectory:
         os.makedirs(output_dir, exist_ok=True)
     

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from typing import Tuple
 
-from LFE_TAP.models.tapfe import TAPFormer
+from LFE_TAP.models.tapformer import TAPFormer
 from LFE_TAP.utils.model_utils import get_points_on_a_grid, get_sift_sampled_pts, get_uniformly_sampled_pts, normalize_voxels
 
 class EvaluationPredictor(torch.nn.Module):
