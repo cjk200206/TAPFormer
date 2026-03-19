@@ -1,8 +1,8 @@
 # Configuration file for Aedat4 dataset evaluation
 
 # Dataset paths
-dataset_dir: "/media/ljx/ljx/data/TAPFormer_Dataset"
-ckpt_root: "/media/ljx/ljx/tapformer.pth"
+dataset_dir: "dataset_dir"
+ckpt_root: "tapformer.pth"
 
 # Test sequences
 eval_datasets:

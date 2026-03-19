@@ -1,8 +1,8 @@
 # Configuration file for EDS and EC dataset evaluation
 
 # Dataset paths
-dataset_dir: "/media/ljx/ljx/data"
-ckpt_root: "/media/ljx/ljx/tapformer.pth"
+dataset_dir: "dataset_dir"
+ckpt_root: "tapformer.pth"
 
 # Test sequences
 eval_datasets_eds:
