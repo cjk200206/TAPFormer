@@ -9,7 +9,13 @@
 </p>
 
 <p align="center">
-  Jiaxiong Liu<sup>1</sup>, Zhen Tan<sup>1</sup>, Jinpu Zhang<sup>1</sup>, Yi Zhou<sup>2</sup>, Hui Shen<sup>1</sup>, Xieyuanli Chen<sup>1</sup>, Dewen Hu<sup>1</sup>
+  <a href="https://ieeexplore.ieee.org/author/342289224589410">Jiaxiong Liu</a><sup>1</sup>, 
+  <a href="https://magictz.github.io/">Zhen Tan</a><sup>1</sup>, 
+  <a href="https://ieeexplore.ieee.org/author/37090028543">Jinpu Zhang</a><sup>1</sup>, 
+  <a href="https://ieeexplore.ieee.org/author/37088979635">Yi Zhou</a><sup>2</sup>, 
+  <a href="https://www.researchgate.net/profile/Hui-Shen-5">Hui Shen</a><sup>1</sup>, 
+  <a href="https://chen-xieyuanli.github.io/">Xieyuanli Chen</a><sup>1</sup>, 
+  <a href="https://ieeexplore.ieee.org/author/37271079500">Dewen Hu</a><sup>1</sup>
 </p>
 
 <p align="center">
