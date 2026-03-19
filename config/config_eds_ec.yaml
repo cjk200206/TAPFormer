@@ -6,10 +6,10 @@ ckpt_root: "tapformer.pth"
 
 # Test sequences
 eval_datasets_eds:
-  # - "peanuts_light_160_386"
-  # - "rocket_earth_light_338_438"
-  # - "ziggy_in_the_arena_1350_1650"
-  # - "peanuts_running_2360_2460"
+  - "peanuts_light_160_386"
+  - "rocket_earth_light_338_438"
+  - "ziggy_in_the_arena_1350_1650"
+  - "peanuts_running_2360_2460"
 
 eval_datasets_ec:
   - "shapes_translation_8_88"
