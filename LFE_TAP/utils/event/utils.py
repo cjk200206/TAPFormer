@@ -1,4 +1,5 @@
 import os
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 from multiprocessing import Pool
 
 import h5py
@@ -76,31 +77,31 @@ def read_input(input_path, representation):
     assert os.path.exists(input_path), f"Path to input file {input_path} doesn't exist."
     
     if "time_surfaces_accumulate" in representation:
-        return h5py.File(input_path, "r")["time_surface_accumulate"]
+        return h5py.File(input_path, "r", locking=False)["time_surface_accumulate"]
     
     elif "event_stack_v1_5" in representation:
-        return h5py.File(input_path, "r")["time_surface"]
+        return h5py.File(input_path, "r", locking=False)["time_surface"]
     
     elif "count_images" in representation:
-        return h5py.File(input_path, "r")["count_images"]
+        return h5py.File(input_path, "r", locking=False)["count_images"]
     
     elif "time_surface" in representation:
-        return h5py.File(input_path, "r")["time_surface"]
+        return h5py.File(input_path, "r", locking=False)["time_surface"]
 
     elif "voxel" in representation:
-        return h5py.File(input_path, "r")["voxel_grid"]
+        return h5py.File(input_path, "r", locking=False)["voxel_grid"]
 
     elif "event_stack" in representation:
-        return h5py.File(input_path, "r")["event_stack"]
+        return h5py.File(input_path, "r", locking=False)["event_stack"]
     
     elif "time_order_surface" in representation:
-        return h5py.File(input_path, "r")["time_order_surface"]
+        return h5py.File(input_path, "r", locking=False)["time_order_surface"]
     
     elif "time_surface" in representation:
-        return h5py.File(input_path, "r")["time_surface"]
+        return h5py.File(input_path, "r", locking=False)["time_surface"]
     
     elif "sobel" in representation:
-        return h5py.File(input_path, "r")["sobel"]
+        return h5py.File(input_path, "r", locking=False)["sobel"]
 
     elif "grayscale" in representation:
         return imread(input_path, IMREAD_GRAYSCALE).astype(np.float32) / 255.0

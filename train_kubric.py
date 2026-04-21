@@ -1,52 +1,25 @@
 import argparse
 import json
-import os
 from pathlib import Path
 
 import torch
+import yaml
 from torch.utils.data import DataLoader
 
-from LFE_TAP.datasets.kubric_movif_dataset import KubricMovifDataset_new
+from LFE_TAP.datasets.kubric_movif_dataset import KubricMovifDataset_etap
 from LFE_TAP.models.tapformer import TAPFormer
 from LFE_TAP.models.losses import TAPFormerLoss
 from LFE_TAP.utils.dataset_utils import FrameEventData
 
 
+def load_config(config_path: str):
+    with open(config_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train TAPFormer on Kubric-format data")
-    parser.add_argument("--data_root", type=str, required=True, help="Path to Kubric root_dir expected by KubricMovifDataset_new")
-    parser.add_argument("--data_root_fast", type=str, default=None, help="Optional root_dir_fast_dataset")
-    parser.add_argument("--save_dir", type=str, default="output/train_kubric")
-    parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--batch_size", type=int, default=1, help="TAPFormer currently supports batch_size=1")
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=5e-4)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--iters", type=int, default=4, help="Refinement iterations in model forward")
-    parser.add_argument("--log_every", type=int, default=10)
-
-    parser.add_argument("--representation", type=str, default="time_surfaces_v2_5")
-    parser.add_argument("--seq_len", type=int, default=24)
-    parser.add_argument("--traj_per_sample", type=int, default=128)
-    parser.add_argument("--height", type=int, default=384)
-    parser.add_argument("--width", type=int, default=512)
-    parser.add_argument("--window_size", type=int, default=8)
-    parser.add_argument("--stride", type=int, default=4)
-    parser.add_argument("--corr_levels", type=int, default=3)
-    parser.add_argument("--corr_radius", type=int, default=3)
-    parser.add_argument("--hidden_size", type=int, default=384)
-    parser.add_argument("--space_depth", type=int, default=3)
-    parser.add_argument("--time_depth", type=int, default=3)
-
-    parser.add_argument("--coord_weight", type=float, default=0.1)
-    parser.add_argument("--visibility_weight", type=float, default=1.0)
-    parser.add_argument("--confidence_weight", type=float, default=1.0)
-    parser.add_argument("--iter_gamma", type=float, default=0.8)
-    parser.add_argument("--confidence_threshold", type=float, default=8.0)
-
-    parser.add_argument("--precision", type=str, default="bf16", choices=["fp32", "fp16", "bf16"])
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--resume", type=str, default=None)
+    parser = argparse.ArgumentParser(description="Train TAPFormer on Kubric/ETAP-format data")
+    parser.add_argument("--config", type=str, default="config/config_kubric_train.yaml", help="Path to training YAML config")
     return parser.parse_args()
 
 
@@ -108,82 +81,100 @@ def move_batch_to_device(sample: FrameEventData, device: torch.device) -> FrameE
 
 def main():
     args = parse_args()
-    set_seed(args.seed)
+    cfg = load_config(args.config)
 
+    dataset_cfg = cfg["dataset"]
+    train_cfg = cfg["train"]
+    model_cfg = cfg["model"]
+    loss_cfg = cfg["loss"]
+
+    set_seed(train_cfg.get("seed", 0))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    if args.batch_size != 1:
-        raise ValueError("TAPFormer forward currently asserts batch_size == 1. Please set --batch_size 1.")
+    batch_size = int(train_cfg.get("batch_size", 1))
+    if batch_size != 1:
+        raise ValueError("TAPFormer forward currently asserts batch_size == 1. Please set train.batch_size: 1")
 
-    save_dir = Path(args.save_dir)
+    save_dir = Path(train_cfg.get("save_dir", "output/train_kubric"))
     save_dir.mkdir(parents=True, exist_ok=True)
     with open(save_dir / "train_args.json", "w", encoding="utf-8") as f:
-        json.dump(vars(args), f, indent=2, ensure_ascii=False)
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
 
-    dataset = KubricMovifDataset_new(
-        root_dir=args.data_root,
-        root_dir_fast_dataset=args.data_root_fast,
-        representation=args.representation,
-        crop_size=(args.height, args.width),
-        seq_len=args.seq_len,
-        traj_per_sample=args.traj_per_sample,
-        sample_vis_1st_frame=False,
-        choose_long_point=False,
-        use_augs=False,
-        if_test=False,
+    dataset = KubricMovifDataset_etap(
+        root_dir=dataset_cfg["data_root"],
+        representation=dataset_cfg.get("representation", "time_surfaces_v2_5"),
+        crop_size=(int(dataset_cfg.get("height", 384)), int(dataset_cfg.get("width", 512))),
+        seq_len=int(dataset_cfg.get("seq_len", 24)),
+        traj_per_sample=int(dataset_cfg.get("traj_per_sample", 128)),
+        sample_vis_1st_frame=bool(dataset_cfg.get("sample_vis_1st_frame", False)),
+        choose_long_point=bool(dataset_cfg.get("choose_long_point", False)),
+        use_augs=bool(dataset_cfg.get("use_augs", False)),
+        if_test=bool(dataset_cfg.get("if_test", False)),
     )
 
     loader = DataLoader(
         dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        persistent_workers=args.num_workers > 0,
+        batch_size=batch_size,
+        shuffle=bool(train_cfg.get("shuffle", True)),
+        num_workers=int(train_cfg.get("num_workers", 4)),
+        pin_memory=bool(train_cfg.get("pin_memory", True)),
+        persistent_workers=int(train_cfg.get("num_workers", 4)) > 0,
         collate_fn=train_collate,
-        drop_last=True,
+        drop_last=bool(train_cfg.get("drop_last", True)),
     )
 
     model = TAPFormer(
-        window_size=args.window_size,
-        stride=args.stride,
-        corr_radius=args.corr_radius,
-        corr_levels=args.corr_levels,
-        hidden_size=args.hidden_size,
-        space_depth=args.space_depth,
-        time_depth=args.time_depth,
+        window_size=int(model_cfg.get("window_size", 8)),
+        stride=int(model_cfg.get("stride", 4)),
+        corr_radius=int(model_cfg.get("corr_radius", 3)),
+        corr_levels=int(model_cfg.get("corr_levels", 3)),
+        hidden_size=int(model_cfg.get("hidden_size", 384)),
+        space_depth=int(model_cfg.get("space_depth", 3)),
+        time_depth=int(model_cfg.get("time_depth", 3)),
     ).to(device)
 
     criterion = TAPFormerLoss(
-        coord_weight=args.coord_weight,
-        visibility_weight=args.visibility_weight,
-        confidence_weight=args.confidence_weight,
-        iter_gamma=args.iter_gamma,
-        confidence_threshold=args.confidence_threshold,
+        coord_weight=float(loss_cfg.get("coord_weight", 0.1)),
+        visibility_weight=float(loss_cfg.get("visibility_weight", 1.0)),
+        confidence_weight=float(loss_cfg.get("confidence_weight", 1.0)),
+        iter_gamma=float(loss_cfg.get("iter_gamma", 0.8)),
+        confidence_threshold=float(loss_cfg.get("confidence_threshold", 8.0)),
     ).to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scaler = torch.cuda.amp.GradScaler(enabled=(args.precision == "fp16" and device.type == "cuda"))
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(train_cfg.get("lr", 5e-4)),
+        weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
+    )
+
+    precision = train_cfg.get("precision", "bf16")
+    scaler = torch.cuda.amp.GradScaler(enabled=(precision == "fp16" and device.type == "cuda"))
 
     start_epoch = 0
-    if args.resume:
-        ckpt = torch.load(args.resume, map_location=device)
+    resume_path = train_cfg.get("resume", None)
+    if resume_path:
+        ckpt = torch.load(resume_path, map_location=device)
         model.load_state_dict(ckpt["model"], strict=False)
         if "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch = int(ckpt.get("epoch", -1)) + 1
 
-    if args.precision == "bf16":
+    if precision == "bf16":
         autocast_dtype = torch.bfloat16
-    elif args.precision == "fp16":
+    elif precision == "fp16":
         autocast_dtype = torch.float16
     else:
         autocast_dtype = None
 
     model.train()
     global_step = 0
+    epochs = int(train_cfg.get("epochs", 40))
+    iters = int(train_cfg.get("iters", 4))
+    log_every = int(train_cfg.get("log_every", 10))
+    save_every_epochs = int(train_cfg.get("save_every_epochs", 1))
+    save_last = bool(train_cfg.get("save_last", True))
 
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(start_epoch, epochs):
         running = {"loss": 0.0, "coord_loss": 0.0, "visibility_loss": 0.0, "confidence_loss": 0.0}
         n_steps = 0
 
@@ -198,13 +189,13 @@ def main():
             optimizer.zero_grad(set_to_none=True)
 
             use_amp = (autocast_dtype is not None and device.type == "cuda")
-            with torch.autocast(device_type="cuda", dtype=autocast_dtype, enabled=use_amp):
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype if autocast_dtype is not None else torch.float32, enabled=use_amp):
                 _, _, _, train_data = model(
                     sample.video,
                     sample.events,
                     queries,
-                    iters=args.iters,
-                    img_ifnew=sample.img_ifnew,
+                    iters=iters,
+                    img_ifnew=sample.img_ifnew[0],
                     is_train=True,
                 )
                 loss_dict = criterion(
@@ -215,7 +206,7 @@ def main():
                 )
                 loss = loss_dict["loss"]
 
-            if args.precision == "fp16" and device.type == "cuda":
+            if precision == "fp16" and device.type == "cuda":
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
@@ -228,7 +219,7 @@ def main():
             for k in running:
                 running[k] += float(loss_dict[k].detach().item())
 
-            if global_step % args.log_every == 0:
+            if global_step % log_every == 0:
                 msg = (
                     f"epoch={epoch} step={global_step} "
                     f"loss={running['loss']/max(1,n_steps):.4f} "
@@ -242,9 +233,11 @@ def main():
             "epoch": epoch,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "args": vars(args),
+            "config": cfg,
+            "global_step": global_step,
         }
-        torch.save(epoch_ckpt, save_dir / f"epoch_{epoch:03d}.pth")
+        if save_every_epochs > 0 and ((epoch + 1) % save_every_epochs == 0):
+            torch.save(epoch_ckpt, save_dir / f"epoch_{epoch:03d}.pth")
 
         if n_steps > 0:
             print(
@@ -254,6 +247,17 @@ def main():
                 f"conf={running['confidence_loss']/n_steps:.4f}",
                 flush=True,
             )
+
+    if save_last:
+        final_epoch = max(start_epoch, epochs) - 1
+        final_ckpt = {
+            "epoch": final_epoch,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "config": cfg,
+            "global_step": global_step,
+        }
+        torch.save(final_ckpt, save_dir / "final.pth")
 
 
 if __name__ == "__main__":

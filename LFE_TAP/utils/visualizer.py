@@ -3,12 +3,15 @@ import numpy as np
 import cv2
 import imageio
 import torch
-import flow_vis
+# import flow_vis
 
 from matplotlib import cm
 import torch.nn.functional as F
 import torchvision.transforms as transforms
-from moviepy.editor import ImageSequenceClip
+try:
+    from moviepy.editor import ImageSequenceClip
+except Exception:
+    ImageSequenceClip = None
 import matplotlib.pyplot as plt
 
 
@@ -109,13 +112,23 @@ class Visualizer:
             os.makedirs(self.save_dir, exist_ok=True)
             wide_list = list(video.unbind(1))
             wide_list = [wide[0].permute(1, 2, 0).cpu().numpy() for wide in wide_list]
-            clip = ImageSequenceClip(wide_list[2:-1], fps=self.fps)
+            frames = wide_list[2:-1]
 
-            # Write the video file
             save_path = os.path.join(self.save_dir, f"{filename}_pred_track.mp4")
-            clip.write_videofile(save_path, codec="libx264", fps=self.fps, logger=None)
-
-            print(f"Video saved to {save_path}")
+            if ImageSequenceClip is not None:
+                clip = ImageSequenceClip(frames, fps=self.fps)
+                clip.write_videofile(save_path, codec="libx264", fps=self.fps, logger=None)
+                print(f"Video saved to {save_path}")
+            else:
+                try:
+                    with imageio.get_writer(save_path, fps=self.fps, codec="libx264") as video_writer:
+                        for frame in frames:
+                            video_writer.append_data(frame)
+                    print(f"Video saved to {save_path}")
+                except Exception:
+                    gif_path = os.path.join(self.save_dir, f"{filename}_pred_track.gif")
+                    imageio.mimsave(gif_path, frames, fps=self.fps)
+                    print(f"Video saved to {gif_path}")
 
     def draw_tracks_on_video(
         self,
@@ -151,7 +164,8 @@ class Visualizer:
 
         vector_colors = np.zeros((T, N, 3))
         if self.mode == "optical_flow":
-            vector_colors = flow_vis.flow_to_color(tracks - tracks[query_frame][None])
+            pass
+            # vector_colors = flow_vis.flow_to_color(tracks - tracks[query_frame][None])
         elif segm_mask is None:
             if self.mode == "rainbow":
                 y_min, y_max = (

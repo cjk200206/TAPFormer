@@ -1,5 +1,7 @@
+import argparse
 import multiprocessing
 import os
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import Pool
@@ -10,8 +12,11 @@ import h5py
 import hdf5plugin
 import numpy as np
 from tqdm import tqdm
+from pathlib import Path
 import sys
-sys.path.append('TAPFormer/LFE_TAP')
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]  # TAPFormer 根目录
+sys.path.append(str(PROJECT_ROOT))
 
 from LFE_TAP.utils.event.representations import VoxelGrid, TimeOrderSurface, events_to_voxel_grid
 # from utils.event.utils import blosc_opts
@@ -492,38 +497,71 @@ def generate_voxel_grid_single(input_seq_dir, output_dir, visualize=False, n_bin
 
 
 def generate_representations(generation_function, input_seq_dir, output_dir, visualize, n_bins, dt):
-    # for d in dt:
-    for input_seq in tqdm(input_seq_dir, total=len(input_seq_dir)):
+    # keep this helper for backward compatibility; no per-worker tqdm here
+    for input_seq in input_seq_dir:
         try:
             generation_function(input_seq, output_dir, visualize=visualize, n_bins=n_bins, dt=dt)
         except Exception as e:
             print(f"Error occurred with input sequence directory: {input_seq}. Error: {e}")
 
-def repeat_process(input_path, output_path, num_repeats, generation_function):
-    # for split in ["train", "test0"]:
-    #     split_dir = input_path / split
-    #     n_seqs = len(os.listdir(str(split_dir)))
-    #     num = n_seqs // num_repeats
-    #     file_lists = [ [] for _ in range(num_repeats) ]
-    #     for idx, file in enumerate(os.listdir(str(split_dir))):
-    #         file_lists[idx % num_repeats].append(os.path.join(split_dir, file))
-    #     pool = Pool(processes=num_repeats)
-    #     for i in range(num_repeats):
-    #         pool.apply_async(generate_representations, args=(generation_function, file_lists[i], output_path, False, 5, 0.01))
-    #     pool.close()
-    #     pool.join()        
-        
-    n_seqs = len(os.listdir(str(input_path)))
-    num = n_seqs // num_repeats
-    file_lists = [ [] for _ in range(num_repeats) ]
-    for idx, file in enumerate(sorted(os.listdir(str(input_path)))):
-        file_lists[idx % num_repeats].append(os.path.join(input_path, file))
-    pool = Pool(processes=num_repeats)
-    for i in range(num_repeats):
-        pool.apply_async(generate_representations, args=(generation_function, file_lists[i], output_path, False, 5, 0.01))
-    pool.close()
-    pool.join()    
-            
+
+def _generate_one_sequence(args):
+    generation_function, input_seq, output_dir, visualize, n_bins, dt = args
+    try:
+        generation_function(input_seq, output_dir, visualize=visualize, n_bins=n_bins, dt=dt)
+        return input_seq, True, ""
+    except Exception as e:
+        return input_seq, False, str(e)
+
+
+def repeat_process(
+    input_path,
+    output_path,
+    num_repeats,
+    generation_function,
+    visualize=False,
+    n_bins=5,
+    dt=0.01,
+):
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+
+    seq_paths = [
+        str(input_path / fname)
+        for fname in sorted(os.listdir(str(input_path)))
+        if (input_path / fname).is_dir()
+    ]
+    if len(seq_paths) == 0:
+        print(f"[WARN] No sequence directory found in {input_path}")
+        return
+
+    num_workers = max(1, min(int(num_repeats), len(seq_paths)))
+    if visualize and num_workers > 1:
+        print("[WARN] visualize=True is incompatible with multi-worker progress display; forcing num_workers=1.")
+        num_workers = 1
+
+    tasks = [
+        (generation_function, seq_path, output_path, visualize, n_bins, dt)
+        for seq_path in seq_paths
+    ]
+
+    if num_workers == 1:
+        for task in tqdm(tasks, total=len(tasks), desc="Generating representations"):
+            _, ok, err = _generate_one_sequence(task)
+            if not ok:
+                print(f"Error occurred with input sequence directory: {task[1]}. Error: {err}")
+        return
+
+    with Pool(processes=num_workers) as pool:
+        for input_seq, ok, err in tqdm(
+            pool.imap_unordered(_generate_one_sequence, tasks),
+            total=len(tasks),
+            desc="Generating representations",
+        ):
+            if not ok:
+                print(f"Error occurred with input sequence directory: {input_seq}. Error: {err}")
+
+
 def generate(
     input_dir,
     output_dir,
@@ -531,6 +569,7 @@ def generate(
     dts=(0.01,),
     n_bins=5,
     visualize=False,
+    num_repeats=10,
     **kwargs,
 ):
     input_dir = Path(input_dir)
@@ -551,8 +590,58 @@ def generate(
     else:
         raise NotImplementedError(f"No generation function for {representation_type}")
     
-    repeat_process(input_dir, output_dir, 10, generation_function)
+    if isinstance(dts, (list, tuple)):
+        dt = float(dts[0]) if len(dts) > 0 else 0.01
+    else:
+        dt = float(dts)
+
+    repeat_process(
+        input_dir,
+        output_dir,
+        num_repeats,
+        generation_function,
+        visualize=visualize,
+        n_bins=n_bins,
+        dt=dt,
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Generate event representations for TAPFormer Kubric-style data."
+    )
+    parser.add_argument("--input-dir", type=str, required=True, help="Directory containing per-sequence folders.")
+    parser.add_argument("--output-dir", type=str, required=True, help="Directory to write generated representations.")
+    parser.add_argument(
+        "--representation-type",
+        type=str,
+        required=True,
+        choices=(
+            "time_surface",
+            "time_surface_accumulate",
+            "voxel_grid",
+            "event_stack",
+            "event_count",
+            "time_order_surface",
+        ),
+        help="Representation type to generate.",
+    )
+    parser.add_argument("--dt", type=float, default=0.01, help="Time interval in seconds.")
+    parser.add_argument("--n-bins", type=int, default=5, help="Number of temporal bins.")
+    parser.add_argument("--num-repeats", type=int, default=10, help="Number of worker processes.")
+    parser.add_argument("--visualize", action="store_true", help="Enable OpenCV visualization while generating.")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    generate("input_dir", "output_dir", "time_surface")
+    # generate("input_dir", "output_dir", "time_surface")
+    args = parse_args()
+    generate(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        representation_type=args.representation_type,
+        dts=(args.dt,),
+        n_bins=args.n_bins,
+        visualize=args.visualize,
+        num_repeats=args.num_repeats,
+    )

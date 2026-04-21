@@ -201,32 +201,56 @@ class TAPFormer(nn.Module):
         dtype = rgbs.dtype
         
         # fusion event and image to get fusion feature
-        # start = time.time()
-        fmaps = self.fusion_block(rgbs.reshape(-1, C_img, H, W), events.reshape(-1, C, H, W), img_ifnew)
-        # print(f"fusion block time: {time.time() - start}")
-        fmaps = fmaps.permute(0, 2, 3, 1)
-        fmaps = fmaps / torch.sqrt(
-            torch.maximum(
-                torch.sum(torch.square(fmaps), axis=-1, keepdims=True),
-                torch.tensor(1e-12, device=fmaps.device),
-            )
-        )
-        fmaps = fmaps.permute(0, 3, 1, 2).reshape(
-            B, -1, self.latent_dim, H_stride, W_stride
-        )
-        fmaps = fmaps.to(dtype)
-        
+        fmaps_out = self.fusion_block(rgbs.reshape(-1, C_img, H, W), events.reshape(-1, C, H, W), img_ifnew)
+
         # compute queries point feature
         fmaps_pyramid = []
         track_feat_pyramid = []
         track_feat_support_pyramid = []
-        fmaps_pyramid.append(fmaps)
-        for i in range(self.corr_levels - 1):
-            fmaps_ = fmaps.reshape(B * T, self.latent_dim, fmaps.shape[-2], fmaps.shape[-1])
-            fmaps_ = F.avg_pool2d(fmaps_, 2, stride=2)
-            fmaps = fmaps_.reshape(B, T, self.latent_dim, fmaps_.shape[-2], fmaps_.shape[-1])
+
+        if isinstance(fmaps_out, list):
+            for i, fmap in enumerate(fmaps_out):
+                fmap = fmap.permute(0, 2, 3, 1)
+                fmap = fmap / torch.sqrt(
+                    torch.maximum(
+                        torch.sum(torch.square(fmap), axis=-1, keepdims=True),
+                        torch.tensor(1e-12, device=fmap.device),
+                    )
+                )
+                fmap = fmap.permute(0, 3, 1, 2).reshape(
+                    B, -1, self.latent_dim, int(H_stride / 2**i), int(W_stride / 2**i)    
+                )
+                fmaps_pyramid.append(fmap.to(dtype))
+
+            if len(fmaps_pyramid) == 0:
+                raise ValueError("fusion_block returned an empty pyramid")
+
+            while len(fmaps_pyramid) < self.corr_levels:
+                fmap = fmaps_pyramid[-1]
+                fmap_ = fmap.reshape(B * T, self.latent_dim, fmap.shape[-2], fmap.shape[-1])
+                fmap_ = F.avg_pool2d(fmap_, 2, stride=2)
+                fmap = fmap_.reshape(B, T, self.latent_dim, fmap_.shape[-2], fmap_.shape[-1])
+                fmaps_pyramid.append(fmap.to(dtype))
+        else:
+            fmaps = fmaps_out.permute(0, 2, 3, 1)
+            fmaps = fmaps / torch.sqrt(
+                torch.maximum(
+                    torch.sum(torch.square(fmaps), axis=-1, keepdims=True),
+                    torch.tensor(1e-12, device=fmaps.device),
+                )
+            )
+            fmaps = fmaps.permute(0, 3, 1, 2).reshape(
+                B, -1, self.latent_dim, H_stride, W_stride
+            )
+            fmaps = fmaps.to(dtype)
+
             fmaps_pyramid.append(fmaps)
-            
+            for _ in range(self.corr_levels - 1):
+                fmap_ = fmaps.reshape(B * T, self.latent_dim, fmaps.shape[-2], fmaps.shape[-1])
+                fmap_ = F.avg_pool2d(fmap_, 2, stride=2)
+                fmaps = fmap_.reshape(B, T, self.latent_dim, fmap_.shape[-2], fmap_.shape[-1])
+                fmaps_pyramid.append(fmaps)
+
         for i in range(self.corr_levels):
             track_feat, track_feat_support = get_track_feat(fmaps_pyramid[i], queried_frames, queried_coords/2**i, support_radius=self.corr_radius)
             track_feat_pyramid.append(track_feat.repeat(1, T, 1, 1))
@@ -280,12 +304,12 @@ class TAPFormer(nn.Module):
                     [coord[:, :S_trimmed] for coord in coords]
                 )
                 all_vis_predictions.append(
-                    [torch.sigmoid(vis[:, :S_trimmed]) for vis in viss]
+                    [vis[:, :S_trimmed] for vis in viss]
                 )
                 all_confidence_predictions.append(
-                    [torch.sigmoid(conf[:, :S_trimmed]) for conf in confs]
+                    [conf[:, :S_trimmed] for conf in confs]
                 )
-                
+        # Keep inference-facing outputs as probabilities for downstream code compatibility.
         vis_predicted = torch.sigmoid(vis_predicted)
         conf_predicted = torch.sigmoid(conf_predicted)
         

@@ -1,0 +1,54 @@
+# Configuration file for Kubric/ETAP visualization
+
+ckpt_root: "output/train_kubric/final.pth"
+# ckpt_root: "output/tapformer.pth"
+
+dataset:
+  data_root: "data/event_kubric/val"
+  representation: "time_surfaces_v2_5"
+  seq_len: 95
+  traj_per_sample: 256
+  height: 384
+  width: 512
+  sample_vis_1st_frame: false
+  choose_long_point: false
+  use_augs: false
+  if_test: true
+
+model:
+  backbone: "basic"
+  # window_size: 8
+  window_size: 16
+  stride: 4
+  corr_levels: 3
+  corr_radius: 3
+  hidden_size: 384
+  space_depth: 3
+  time_depth: 3
+
+predictor:
+  n_iters: 6
+  grid_size: 0
+  local_grid_size: 0
+  single_point: false
+  sift_size: 0
+  num_uniformly_sampled_pts: 0
+  local_extent: 50
+  if_test: true
+
+eval:
+  # If empty, use [start_index, start_index+max_seqs)
+  seq_names: []
+  start_index: 0
+  max_seqs: 5
+
+visualization:
+  output_dir: "output/eval_kubric"
+  enable: true
+  video_model: "events"   # events | rgb
+  use_clear_video: true
+  visibility_threshold: 0.8
+  fps: 20
+  linewidth: 2
+  mode: "rainbow"
+  tracks_leave_trace: 16

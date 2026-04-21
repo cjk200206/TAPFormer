@@ -80,17 +80,17 @@ class TAPFormerLoss(nn.Module):
             for it in range(n_iters):
                 weight = self.iter_gamma ** (n_iters - 1 - it)
                 pred_coords = iter_coord_preds[it]
-                pred_vis = iter_vis_preds[it].clamp(1e-4, 1.0 - 1e-4)
-                pred_conf = iter_conf_preds[it].clamp(1e-4, 1.0 - 1e-4)
+                pred_vis_logits = iter_vis_preds[it]
+                pred_conf_logits = iter_conf_preds[it]
 
                 coord_l2 = torch.linalg.norm(pred_coords - gt_traj_w, dim=-1)
                 coord_loss_total = coord_loss_total + weight * _masked_mean(coord_l2, coord_mask_w)
 
-                vis_bce = F.binary_cross_entropy(pred_vis, gt_vis_w, reduction="none")
+                vis_bce = F.binary_cross_entropy_with_logits(pred_vis_logits, gt_vis_w, reduction="none")
                 vis_loss_total = vis_loss_total + weight * _masked_mean(vis_bce, gt_valid_w)
 
                 conf_target = ((coord_l2.detach() < self.confidence_threshold).float() * gt_vis_w)
-                conf_bce = F.binary_cross_entropy(pred_conf, conf_target, reduction="none")
+                conf_bce = F.binary_cross_entropy_with_logits(pred_conf_logits, conf_target, reduction="none")
                 conf_loss_total = conf_loss_total + weight * _masked_mean(conf_bce, gt_valid_w)
 
         norm = max(1, len(all_coords_predictions))

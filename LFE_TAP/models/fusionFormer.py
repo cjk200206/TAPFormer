@@ -160,8 +160,10 @@ class CLWF(nn.Module):
         for time_attn in self.TemporalAdapter:
             x_out = time_attn(x_out)
         x_out1 = rearrange(x_out, '(h w) t c -> t c h w', h=self.patches_resolution[0], w=self.patches_resolution[1])
-        x_out2 = self.up1(x_out1, torch.tensor(img_ifnew)[:,None,None,None].to(x1_e.device).float() * (x1_i) + torch.tensor(1-img_ifnew)[:,None,None,None].to(x1_e.device).float() * (x1_e))
-        x_out3 = self.up2(x_out2, torch.tensor(img_ifnew)[:,None,None,None].to(x1_e.device).float() * (x_i) + torch.tensor(1-img_ifnew)[:,None,None,None].to(x1_e.device).float() * (x_e))
+        img_ifnew_mask = torch.as_tensor(img_ifnew, device=x1_e.device, dtype=x1_e.dtype)[:, None, None, None]
+        img_ifnew_inv_mask = 1.0 - img_ifnew_mask
+        x_out2 = self.up1(x_out1, img_ifnew_mask * x1_i + img_ifnew_inv_mask * x1_e)
+        x_out3 = self.up2(x_out2, img_ifnew_mask * x_i + img_ifnew_inv_mask * x_e)
         x_out1 = self.cov_out1(x_out1)
         x_out2 = self.cov_out2(x_out2)
         x_out_pyramid = [x_out3, x_out2, x_out1]

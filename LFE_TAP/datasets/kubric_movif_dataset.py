@@ -776,3 +776,206 @@ class KubricMovifDataset_new(FETAPDataset):
     
     def __len__(self):
         return len(self.seq_names)
+
+class KubricMovifDataset_etap(FETAPDataset):
+    def __init__(
+        self,
+        root_dir,
+        representation="time_surfaces_v2_5",
+        crop_size=(384, 512),
+        seq_len=24,
+        traj_per_sample=256,
+        sample_vis_1st_frame=False,
+        choose_long_point=False,
+        use_augs=False,
+        if_test=False,
+    ):
+        super(KubricMovifDataset_etap, self).__init__(
+            root_dir=root_dir,
+            representation=representation,
+            crop_size=crop_size,
+            seq_len=seq_len,
+            traj_per_sample=traj_per_sample,
+            sample_vis_1st_frame=sample_vis_1st_frame,
+            choose_long_point=choose_long_point,
+            use_augs=use_augs,
+            if_test=if_test,
+        )
+        self.representation = representation
+        self.sample_vis_1st_frame = sample_vis_1st_frame
+        self.choose_long_point = choose_long_point
+        self.pad_bounds = [0, 25]
+        self.resize_lim = [0.75, 1.25]
+        self.resize_delta = 0.05
+        self.max_crop_offset = 15
+        self.if_test = if_test
+        self.seq_names = [
+            os.path.join(self.root_dir, fname)
+            for fname in os.listdir(self.root_dir)
+            if os.path.isdir(os.path.join(self.root_dir, fname))
+        ]
+        print("found %d unique seqences in %s" % (len(self.seq_names), self.root_dir))
+
+    def getitem_helper(self, index):
+        gotit = True
+        seq_name = self.seq_names[index]
+
+        npy_path = os.path.join(seq_name, "annotations.npy")
+        rgb_dir_path = os.path.join(seq_name, "raw")
+        event_dir_path = os.path.join(seq_name, "events", self.representation)
+
+        raw_files = sorted(os.listdir(rgb_dir_path))
+        rgb_files = [f for f in raw_files if f.startswith("rgba_blur_") and f.endswith(".png")]
+        clear_rgb_files = [
+            f for f in raw_files if f.startswith("rgba_") and not f.startswith("rgba_blur_") and f.endswith(".png")
+        ]
+        event_files = sorted(os.listdir(event_dir_path))
+
+        rgb_imgs = []
+        img_ifnew = []
+        clear_rgb_imgs = []
+        event_imgs = []
+        if not self.if_test:
+            random_id = np.random.randint(0, 95 - 24)
+            rgb_files = rgb_files[random_id: random_id + 24]
+            event_files = event_files[random_id: random_id + 24]
+            clear_rgb_files = clear_rgb_files[random_id: random_id + 24]
+        else:
+            rgb_files = rgb_files[:-1]
+            clear_rgb_files = clear_rgb_files[:-1]
+
+        next_insert = 0
+        for i, img_path in enumerate(rgb_files):
+            try:
+                if i == next_insert:
+                    img = imageio.v2.imread(os.path.join(rgb_dir_path, img_path))
+                    if img.ndim == 3 and img.shape[-1] == 4:
+                        img = img[..., :3]
+                    rgb_imgs.append(img)
+                    img_ifnew.append(1)
+                    if not self.if_test:
+                        next_insert += np.random.choice([3, 4])
+                    else:
+                        next_insert += 4
+                else:
+                    rgb_imgs.append(rgb_imgs[-1])
+                    img_ifnew.append(0)
+            except Exception as e:
+                print(f"error reading image at path:{img_path}_{rgb_dir_path}")
+                print(f"error mrssage:{str(e)}")
+                gotit = False
+                return [], gotit
+
+        for i, img_path in enumerate(clear_rgb_files):
+            try:
+                img = imageio.v2.imread(os.path.join(rgb_dir_path, img_path))
+                if img.ndim == 3 and img.shape[-1] == 4:
+                    img = img[..., :3]
+                clear_rgb_imgs.append(img)
+            except Exception as e:
+                print(f"error reading image at path:{img_path}_{rgb_dir_path}")
+                print(f"error mrssage:{str(e)}")
+                gotit = False
+                return [], gotit
+
+        for i, event_path in enumerate(event_files):
+            try:
+                event_imgs.append(read_input(os.path.join(event_dir_path, event_path), self.representation))
+            except Exception as e:
+                print(f"error reading event at path:{event_path}_{event_dir_path}")
+                print(f"error mrssage:{str(e)}")
+                gotit = False
+                return [], gotit
+
+        rgbs = np.stack(rgb_imgs)
+        clear_rgbs = np.stack(clear_rgb_imgs)
+        events = np.stack(event_imgs)
+        annot_dict = np.load(npy_path, allow_pickle=True).item()
+        if not self.if_test:
+            traj_2d = annot_dict["target_points"][:, random_id: random_id + 24]
+            visibility = annot_dict["occluded"][:, random_id: random_id + 24]
+        else:
+            traj_2d = annot_dict["target_points"][:, :-1]
+            visibility = annot_dict["occluded"][:, :-1]
+
+        assert self.seq_len == len(rgbs) == len(clear_rgbs)
+
+        traj_2d = np.transpose(traj_2d, (1, 0, 2))
+        visibility = np.transpose(np.logical_not(visibility), (1, 0))
+        if self.use_augs:
+            print("new kubric dataset can't use augs!!!")
+            rgbs, events, traj_2d = self.add_spatial_augs(rgbs, events, traj_2d, visibility)
+        else:
+            rgbs, events, traj_2d, clear_rgbs = self.crop(rgbs, events, traj_2d, clear_rgbs=clear_rgbs)
+
+        visibility[traj_2d[:, :, 0] > self.crop_size[1] - 1] = False
+        visibility[traj_2d[:, :, 0] < 0] = False
+        visibility[traj_2d[:, :, 1] > self.crop_size[0] - 1] = False
+        visibility[traj_2d[:, :, 1] < 0] = False
+
+        visibility = torch.from_numpy(visibility)
+        traj_2d = torch.from_numpy(traj_2d)
+
+        crop_tensor = torch.tensor(self.crop_size).flip(0)[None, None] / 2.0
+        close_pts_inds = torch.all(
+            torch.linalg.vector_norm(traj_2d[..., :2] - crop_tensor, dim=-1) < 1000.0,
+            dim=0,
+        )
+        traj_2d = traj_2d[:, close_pts_inds]
+        visibility = visibility[:, close_pts_inds]
+
+        visibile_pts_first_frame_inds = (visibility[0]).nonzero(as_tuple=False)
+
+        if self.sample_vis_1st_frame:
+            visiblile_pts_inds = visibile_pts_first_frame_inds
+        else:
+            visiblile_pts_mid_frame_inds = (visibility[self.seq_len // 2]).nonzero(as_tuple=False)
+            visibile_pts_last_frame_inds = (visibility[self.seq_len - 1]).nonzero(as_tuple=False)
+            visiblile_pts_inds = torch.cat(
+                (visibile_pts_first_frame_inds, visiblile_pts_mid_frame_inds, visibile_pts_last_frame_inds), dim=0
+            )
+
+        point_inds = torch.randperm(len(visiblile_pts_inds))[:self.traj_per_sample]
+        if len(point_inds) < self.traj_per_sample and not self.if_test:
+            print(seq_name, "get point num ", len(point_inds), "less than ", self.traj_per_sample, " random_id is", random_id)
+            gotit = False
+
+        if self.choose_long_point:
+            distance = np.linalg.norm(
+                traj_2d[-1, visiblile_pts_inds, :] - traj_2d[0, visiblile_pts_inds, :], axis=-1
+            )[:, 0]
+            weight = distance / np.sum(distance)
+            point_inds = torch.tensor(np.random.choice(len(distance), size=self.traj_per_sample, p=weight))
+            visible_inds_sampled = visiblile_pts_inds[point_inds]
+        else:
+            visible_inds_sampled = visiblile_pts_inds[point_inds]
+
+        if len(visible_inds_sampled.shape) == 2:
+            visible_inds_sampled = visible_inds_sampled.squeeze(1)
+        trajs = traj_2d[:, visible_inds_sampled].float()
+        visibles = visibility[:, visible_inds_sampled]
+        valid = torch.ones((self.seq_len, self.traj_per_sample))
+
+        rgbs = torch.from_numpy(np.stack(rgbs)).permute(0, 3, 1, 2).float()
+        clear_rgbs = torch.from_numpy(np.stack(clear_rgbs)).permute(0, 3, 1, 2).float()
+        events = torch.from_numpy(np.stack(events)).float()
+        if "event_stack" not in self.representation:
+            events = events.permute(0, 3, 1, 2)
+        seqs = torch.ones((self.seq_len, 1, self.crop_size[0], self.crop_size[1]))
+        img_ifnew = torch.Tensor(img_ifnew)
+        sample = FrameEventData(
+            video=rgbs,
+            events=events,
+            segmentation=seqs,
+            trajectory=trajs,
+            visibility=visibles,
+            valid=valid,
+            seq_name=seq_name,
+            img_ifnew=img_ifnew,
+            clear_video=clear_rgbs,
+        )
+        assert sample.img_ifnew is not None, "发现空值样本"
+        return sample, gotit
+
+    def __len__(self):
+        return len(self.seq_names)
