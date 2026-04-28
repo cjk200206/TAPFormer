@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -8,6 +9,7 @@ from torch.utils.data import DataLoader
 
 from LFE_TAP.datasets.kubric_movif_dataset import KubricMovifDataset_etap
 from LFE_TAP.models.tapformer import TAPFormer
+from LFE_TAP.models.tapformer_ablation import TAPFormerAblation
 from LFE_TAP.models.losses import TAPFormerLoss
 from LFE_TAP.utils.dataset_utils import FrameEventData
 
@@ -79,6 +81,57 @@ def move_batch_to_device(sample: FrameEventData, device: torch.device) -> FrameE
     return sample
 
 
+def build_model_from_config(model_cfg):
+    common_kwargs = dict(
+        window_size=int(model_cfg.get("window_size", 8)),
+        stride=int(model_cfg.get("stride", 4)),
+        corr_radius=int(model_cfg.get("corr_radius", 3)),
+        corr_levels=int(model_cfg.get("corr_levels", 3)),
+        hidden_size=int(model_cfg.get("hidden_size", 384)),
+        space_depth=int(model_cfg.get("space_depth", 3)),
+        time_depth=int(model_cfg.get("time_depth", 3)),
+    )
+    model_name = str(model_cfg.get("name", "tapformer")).lower().strip()
+    if model_name == "tapformer":
+        return TAPFormer(**common_kwargs)
+    if model_name in {"tapformer_ablation", "ablation"}:
+        return TAPFormerAblation(
+            feature_mode=model_cfg.get("feature_mode", "fusion"),
+            **common_kwargs,
+        )
+    raise ValueError(
+        f"Unsupported model.name={model_name}. "
+        "Use one of: tapformer, tapformer_ablation."
+    )
+
+
+def extract_state_dict(ckpt):
+    if isinstance(ckpt, dict):
+        for key in ("model", "state_dict", "model_state_dict"):
+            if key in ckpt and isinstance(ckpt[key], dict):
+                return ckpt[key]
+    if isinstance(ckpt, dict):
+        return ckpt
+    raise ValueError("Checkpoint format is not supported: expected a state_dict-like dict.")
+
+
+def normalize_state_dict_keys(state_dict):
+    if not state_dict:
+        return state_dict
+    if all(k.startswith("module.") for k in state_dict.keys()):
+        return {k[len("module."):]: v for k, v in state_dict.items()}
+    return state_dict
+
+
+def metric_sign(mode: str):
+    mode_norm = str(mode).lower().strip()
+    if mode_norm == "min":
+        return -1.0
+    if mode_norm == "max":
+        return 1.0
+    raise ValueError(f"Unsupported best_mode={mode}. Use one of: min, max.")
+
+
 def main():
     args = parse_args()
     cfg = load_config(args.config)
@@ -123,15 +176,12 @@ def main():
         drop_last=bool(train_cfg.get("drop_last", True)),
     )
 
-    model = TAPFormer(
-        window_size=int(model_cfg.get("window_size", 8)),
-        stride=int(model_cfg.get("stride", 4)),
-        corr_radius=int(model_cfg.get("corr_radius", 3)),
-        corr_levels=int(model_cfg.get("corr_levels", 3)),
-        hidden_size=int(model_cfg.get("hidden_size", 384)),
-        space_depth=int(model_cfg.get("space_depth", 3)),
-        time_depth=int(model_cfg.get("time_depth", 3)),
-    ).to(device)
+    model = build_model_from_config(model_cfg).to(device)
+    print(
+        f"model.name={model_cfg.get('name', 'tapformer')} "
+        f"feature_mode={model_cfg.get('feature_mode', 'fusion')}",
+        flush=True,
+    )
 
     criterion = TAPFormerLoss(
         coord_weight=float(loss_cfg.get("coord_weight", 0.1)),
@@ -151,13 +201,28 @@ def main():
     scaler = torch.cuda.amp.GradScaler(enabled=(precision == "fp16" and device.type == "cuda"))
 
     start_epoch = 0
+    pretrained_path = train_cfg.get("pretrained", None)
+    pretrained_strict = bool(train_cfg.get("pretrained_strict", False))
+    if pretrained_path:
+        ckpt = torch.load(pretrained_path, map_location=device)
+        model_state = normalize_state_dict_keys(extract_state_dict(ckpt))
+        incompatible = model.load_state_dict(model_state, strict=pretrained_strict)
+        print(
+            f"Loaded pretrained weights from {pretrained_path} "
+            f"(strict={pretrained_strict}, missing={len(incompatible.missing_keys)}, "
+            f"unexpected={len(incompatible.unexpected_keys)})",
+            flush=True,
+        )
+
     resume_path = train_cfg.get("resume", None)
     if resume_path:
         ckpt = torch.load(resume_path, map_location=device)
-        model.load_state_dict(ckpt["model"], strict=False)
+        model_state = normalize_state_dict_keys(extract_state_dict(ckpt))
+        model.load_state_dict(model_state, strict=False)
         if "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch = int(ckpt.get("epoch", -1)) + 1
+        print(f"Resumed training from {resume_path} at epoch {start_epoch}", flush=True)
 
     if precision == "bf16":
         autocast_dtype = torch.bfloat16
@@ -173,6 +238,22 @@ def main():
     log_every = int(train_cfg.get("log_every", 10))
     save_every_epochs = int(train_cfg.get("save_every_epochs", 1))
     save_last = bool(train_cfg.get("save_last", True))
+    save_best = bool(train_cfg.get("save_best", True))
+    best_metric_name = str(train_cfg.get("best_metric", "loss"))
+    best_mode = str(train_cfg.get("best_mode", "min")).lower().strip()
+    best_filename = str(train_cfg.get("best_filename", "best.pth"))
+    best_sign = metric_sign(best_mode)
+    best_metric = math.inf if best_mode == "min" else -math.inf
+    best_epoch = -1
+
+    if resume_path:
+        best_metric = float(ckpt.get("best_metric", best_metric))
+        best_epoch = int(ckpt.get("best_epoch", best_epoch))
+        if "best_metric_name" in ckpt:
+            best_metric_name = str(ckpt["best_metric_name"])
+        if "best_mode" in ckpt:
+            best_mode = str(ckpt["best_mode"]).lower().strip()
+            best_sign = metric_sign(best_mode)
 
     for epoch in range(start_epoch, epochs):
         running = {"loss": 0.0, "coord_loss": 0.0, "visibility_loss": 0.0, "confidence_loss": 0.0}
@@ -235,11 +316,43 @@ def main():
             "optimizer": optimizer.state_dict(),
             "config": cfg,
             "global_step": global_step,
+            "best_metric": best_metric,
+            "best_epoch": best_epoch,
+            "best_metric_name": best_metric_name,
+            "best_mode": best_mode,
         }
         if save_every_epochs > 0 and ((epoch + 1) % save_every_epochs == 0):
             torch.save(epoch_ckpt, save_dir / f"epoch_{epoch:03d}.pth")
 
         if n_steps > 0:
+            epoch_metrics = {k: (running[k] / n_steps) for k in running}
+            if best_metric_name not in epoch_metrics:
+                raise ValueError(
+                    f"best_metric={best_metric_name} is not available. "
+                    f"Choose one of: {', '.join(epoch_metrics.keys())}"
+                )
+            current_metric = float(epoch_metrics[best_metric_name])
+            is_better = (current_metric - best_metric) * best_sign > 0
+            if save_best and is_better:
+                best_metric = current_metric
+                best_epoch = epoch
+                best_ckpt = {
+                    "epoch": epoch,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "config": cfg,
+                    "global_step": global_step,
+                    "best_metric": best_metric,
+                    "best_epoch": best_epoch,
+                    "best_metric_name": best_metric_name,
+                    "best_mode": best_mode,
+                }
+                torch.save(best_ckpt, save_dir / best_filename)
+                print(
+                    f"[Best] epoch={epoch} {best_metric_name}={best_metric:.4f} "
+                    f"saved to {save_dir / best_filename}",
+                    flush=True,
+                )
             print(
                 f"[Epoch {epoch}] loss={running['loss']/n_steps:.4f}, "
                 f"coord={running['coord_loss']/n_steps:.4f}, "
@@ -256,6 +369,10 @@ def main():
             "optimizer": optimizer.state_dict(),
             "config": cfg,
             "global_step": global_step,
+            "best_metric": best_metric,
+            "best_epoch": best_epoch,
+            "best_metric_name": best_metric_name,
+            "best_mode": best_mode,
         }
         torch.save(final_ckpt, save_dir / "final.pth")
 

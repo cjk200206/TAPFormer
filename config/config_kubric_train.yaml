@@ -16,7 +16,7 @@ dataset:
 # Training settings
 train:
   save_dir: "output/train_kubric"
-  epochs: 30
+  epochs: 500
   batch_size: 1
   num_workers: 4
   shuffle: true
@@ -25,15 +25,23 @@ train:
   lr: 0.0005
   weight_decay: 0.0001
   iters: 4
-  log_every: 10
-  save_every_epochs: 10   # 0 means disable periodic epoch checkpoints
+  log_every: 100
+  save_every_epochs: 0   # 0 means disable periodic epoch checkpoints
   save_last: true        # always save final.pth after training
+  save_best: true        # save best checkpoint during training
+  best_metric: "loss"    # loss | coord_loss | visibility_loss | confidence_loss
+  best_mode: "min"       # min | max
+  best_filename: "best.pth"
   precision: "bf16"   # fp32 | fp16 | bf16
   seed: 0
+  pretrained: output/final_0427.pth    # optional: load model weights only (does not restore optimizer/epoch)
+  pretrained_strict: false
   resume: null
 
 # Model settings
 model:
+  name: "tapformer"   # tapformer | tapformer_ablation
+  feature_mode: "fusion"       # fusion | image | event (only for tapformer_ablation)
   window_size: 16
   stride: 4
   corr_levels: 3

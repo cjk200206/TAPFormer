@@ -1,10 +1,11 @@
 # Configuration file for Kubric/ETAP visualization
 
-ckpt_root: "output/train_kubric/final.pth"
+ckpt_root: "output/train_kubric/best.pth"
+# ckpt_root: "output/train_kubric/epoch_009.pth"
 # ckpt_root: "output/tapformer.pth"
 
 dataset:
-  data_root: "data/event_kubric/val"
+  data_root: "data/event_kubric/test"
   representation: "time_surfaces_v2_5"
   seq_len: 95
   traj_per_sample: 256
@@ -47,6 +48,7 @@ visualization:
   enable: true
   video_model: "events"   # events | rgb
   use_clear_video: true
+  use_gt_as_prediction: false  # true: visualize GT directly, false: visualize model prediction
   visibility_threshold: 0.8
   fps: 20
   linewidth: 2

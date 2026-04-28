@@ -7,6 +7,7 @@ Usage:
 
 import argparse
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1" 
 import sys
 from pathlib import Path
 
@@ -47,11 +48,20 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_query_from_first_frame(sample):
-    # sample.trajectory: [T, N, 2]
-    first_xy = sample.trajectory[0]  # [N, 2]
-    query_t = torch.zeros((first_xy.shape[0], 1), dtype=first_xy.dtype)
-    queries = torch.cat([query_t, first_xy], dim=1).unsqueeze(0)  # [1, N, 3]
+def build_query_from_first_visible(sample):
+    # sample.trajectory: [T, N, 2], sample.visibility: [T, N]
+    traj = sample.trajectory
+    vis = sample.visibility > 0.5
+    if sample.valid is not None:
+        vis = vis & (sample.valid > 0.5)
+
+    any_vis = vis.any(dim=0)
+    first_vis = torch.argmax(vis.int(), dim=0)
+    first_vis = torch.where(any_vis, first_vis, torch.zeros_like(first_vis))
+
+    point_idx = torch.arange(traj.shape[1], device=traj.device)
+    query_xy = traj[first_vis, point_idx]
+    queries = torch.cat([first_vis.float().unsqueeze(1), query_xy], dim=1).unsqueeze(0)  # [1, N, 3]
     return queries
 
 
@@ -138,6 +148,7 @@ def main():
 
     visibility_threshold = float(vis_cfg.get("visibility_threshold", 0.8))
     use_clear_video = bool(vis_cfg.get("use_clear_video", True))
+    use_gt_as_prediction = bool(vis_cfg.get("use_gt_as_prediction", True))
 
     print(f"Using device: {DEFAULT_DEVICE}")
     print(f"Selected {len(seq_indices)} sequences for visualization")
@@ -151,25 +162,33 @@ def main():
 
         video = sample.clear_video if (use_clear_video and sample.clear_video is not None) else sample.video
         events = sample.events
-        queries = build_query_from_first_frame(sample)
+        queries = build_query_from_first_visible(sample)
 
         video_b = video.unsqueeze(0).to(DEFAULT_DEVICE)
         events_b = events.unsqueeze(0).to(DEFAULT_DEVICE)
         queries_b = queries.to(DEFAULT_DEVICE)
         img_ifnew = sample.img_ifnew
 
-        with torch.no_grad():
-            pred_traj, pred_vis, pred_conf = predictor(video_b, events_b, queries_b, img_ifnew=img_ifnew)
+        if use_gt_as_prediction:
+            pred_traj = sample.trajectory.unsqueeze(0).to(DEFAULT_DEVICE)
+            pred_vis = sample.visibility.unsqueeze(0).to(DEFAULT_DEVICE)
+            pred_conf = torch.ones_like(pred_vis, dtype=torch.float32)
+            print(f"[{seq_name}] using GT for visualization")
+        else:
+            with torch.no_grad():
+                pred_traj, pred_vis, pred_conf = predictor(video_b, events_b, queries_b, img_ifnew=img_ifnew)
 
         print(
             f"[{seq_name}] traj={tuple(pred_traj.shape)} vis={tuple(pred_vis.shape)} conf={tuple(pred_conf.shape)}"
         )
 
+        vis_mask = pred_vis.bool() if use_gt_as_prediction else (pred_vis > visibility_threshold)
+
         visualizer.visualize(
             video_b.detach().cpu(),
             events_b.detach().cpu(),
             pred_traj.detach().cpu(),
-            (pred_vis > visibility_threshold).detach().cpu(),
+            vis_mask.detach().cpu(),
             filename=seq_name,
             video_model=vis_cfg.get("video_model", "events"),
         )
