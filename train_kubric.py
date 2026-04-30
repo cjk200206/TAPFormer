@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from LFE_TAP.datasets.kubric_movif_dataset import KubricMovifDataset_etap
 from LFE_TAP.models.tapformer import TAPFormer
 from LFE_TAP.models.tapformer_ablation import TAPFormerAblation
+from LFE_TAP.models.tapformer_cow_dense import TAPFormerCowDense
 from LFE_TAP.models.losses import TAPFormerLoss
 from LFE_TAP.utils.dataset_utils import FrameEventData
 
@@ -99,9 +100,18 @@ def build_model_from_config(model_cfg):
             feature_mode=model_cfg.get("feature_mode", "fusion"),
             **common_kwargs,
         )
+    if model_name in {"tapformer_cow_dense", "cow_dense"}:
+        return TAPFormerCowDense(
+            cow_head_iters=int(model_cfg.get("cow_head_iters", 4)),
+            cow_refine_model=str(model_cfg.get("cow_refine_model", "vits")),
+            cow_refine_patch_size=int(model_cfg.get("cow_refine_patch_size", 4)),
+            cow_refine_blocks=model_cfg.get("cow_refine_blocks", None),
+            cow_temporal_interleave_stride=int(model_cfg.get("cow_temporal_interleave_stride", 2)),
+            **common_kwargs,
+        )
     raise ValueError(
         f"Unsupported model.name={model_name}. "
-        "Use one of: tapformer, tapformer_ablation."
+        "Use one of: tapformer, tapformer_ablation, tapformer_cow_dense."
     )
 
 

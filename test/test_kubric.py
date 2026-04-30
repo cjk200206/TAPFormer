@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from LFE_TAP.datasets.kubric_movif_dataset import KubricMovifDataset_etap
 from LFE_TAP.evaluator.evaluation_pred import EvaluationPredictor
-from LFE_TAP.evaluator.prediction import TAPFormer_online
+from LFE_TAP.evaluator.prediction import TAPFormerCowDense_online, TAPFormer_online
 from LFE_TAP.utils.visualizer import Visualizer
 
 DEFAULT_DEVICE = (
@@ -65,6 +65,30 @@ def build_query_from_first_visible(sample):
     return queries
 
 
+def build_model_from_config(model_cfg):
+    model_name = str(model_cfg.get("name", "tapformer_online")).lower().strip()
+    common_kwargs = dict(
+        window_size=int(model_cfg.get("window_size", 16)),
+        stride=int(model_cfg.get("stride", 4)),
+        corr_radius=int(model_cfg.get("corr_radius", 3)),
+        corr_levels=int(model_cfg.get("corr_levels", 3)),
+        backbone=model_cfg.get("backbone", "basic"),
+        hidden_size=int(model_cfg.get("hidden_size", 384)),
+        space_depth=int(model_cfg.get("space_depth", 3)),
+        time_depth=int(model_cfg.get("time_depth", 3)),
+    )
+    if model_name in {"tapformer_cow_dense", "cow_dense"}:
+        return TAPFormerCowDense_online(
+            cow_head_iters=int(model_cfg.get("cow_head_iters", 4)),
+            cow_refine_model=str(model_cfg.get("cow_refine_model", "vits")),
+            cow_refine_patch_size=int(model_cfg.get("cow_refine_patch_size", 4)),
+            cow_refine_blocks=model_cfg.get("cow_refine_blocks", None),
+            cow_temporal_interleave_stride=int(model_cfg.get("cow_temporal_interleave_stride", 2)),
+            **common_kwargs,
+        )
+    return TAPFormer_online(**common_kwargs)
+
+
 def main():
     args = parse_args()
     cfg = load_config(args.config)
@@ -90,16 +114,7 @@ def main():
         if_test=bool(dataset_cfg.get("if_test", True)),
     )
 
-    model = TAPFormer_online(
-        window_size=int(model_cfg.get("window_size", 16)),
-        stride=int(model_cfg.get("stride", 4)),
-        corr_radius=int(model_cfg.get("corr_radius", 3)),
-        corr_levels=int(model_cfg.get("corr_levels", 3)),
-        backbone=model_cfg.get("backbone", "basic"),
-        hidden_size=int(model_cfg.get("hidden_size", 384)),
-        space_depth=int(model_cfg.get("space_depth", 3)),
-        time_depth=int(model_cfg.get("time_depth", 3)),
-    )
+    model = build_model_from_config(model_cfg)
 
     state_dict = torch.load(ckpt_root, map_location=DEFAULT_DEVICE)
     if "model" in state_dict:

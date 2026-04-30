@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from LFE_TAP.models.tapformer import TAPFormer, posenc
+from LFE_TAP.models.tapformer_cow_dense import TAPFormerCowDense
 from LFE_TAP.utils.model_utils import get_track_feat, normalize_voxels
 from LFE_TAP.models.embeddings import get_1d_sincos_pos_embed_from_grid
 
@@ -309,3 +310,145 @@ class TAPFormer_online(TAPFormer):
     def load_parameters(self, model):
         # 从训练模型加载参数
         self.load_state_dict(model.state_dict())
+
+
+class TAPFormerCowDense_online(TAPFormerCowDense):
+    def __init__(
+        self,
+        trained_model=None,
+        window_size=16,
+        stride=4,
+        corr_radius=3,
+        corr_levels=3,
+        backbone="basic",
+        num_heads=8,
+        hidden_size=384,
+        space_depth=3,
+        time_depth=3,
+        cow_head_iters=4,
+        cow_refine_model="vits",
+        cow_refine_patch_size=4,
+        cow_refine_blocks=None,
+        cow_temporal_interleave_stride=2,
+    ):
+        if trained_model is not None:
+            super().__init__(
+                window_size=trained_model.window_size,
+                stride=trained_model.stride,
+                corr_radius=corr_radius,
+                corr_levels=corr_levels,
+                backbone=backbone,
+                num_heads=num_heads,
+                hidden_size=hidden_size,
+                space_depth=space_depth,
+                time_depth=time_depth,
+                cow_head_iters=getattr(trained_model.dense_head, "warp_iters", cow_head_iters),
+                cow_refine_model=cow_refine_model,
+                cow_refine_patch_size=cow_refine_patch_size,
+                cow_refine_blocks=cow_refine_blocks,
+                cow_temporal_interleave_stride=cow_temporal_interleave_stride,
+            )
+            self.fusion_block = trained_model.fusion_block
+            self.dense_head = trained_model.dense_head
+        else:
+            super().__init__(
+                window_size=window_size,
+                stride=stride,
+                corr_radius=corr_radius,
+                corr_levels=corr_levels,
+                backbone=backbone,
+                num_heads=num_heads,
+                hidden_size=hidden_size,
+                space_depth=space_depth,
+                time_depth=time_depth,
+                cow_head_iters=cow_head_iters,
+                cow_refine_model=cow_refine_model,
+                cow_refine_patch_size=cow_refine_patch_size,
+                cow_refine_blocks=cow_refine_blocks,
+                cow_temporal_interleave_stride=cow_temporal_interleave_stride,
+            )
+
+    def _slice_img_ifnew(self, img_ifnew, indices, device, dtype):
+        if img_ifnew is None:
+            out = torch.ones(len(indices), device=device, dtype=dtype)
+        elif isinstance(img_ifnew, torch.Tensor):
+            out = img_ifnew[indices].to(device=device, dtype=dtype)
+        else:
+            out = torch.as_tensor(np.asarray(img_ifnew)[indices], device=device, dtype=dtype)
+        if len(out) > 0:
+            out[0] = 1
+        return out
+
+    @torch.no_grad()
+    def forward(
+        self,
+        rgbs,
+        events,
+        queries,
+        iters=4,
+        img_ifnew=None,
+        feat_init=None,
+        interp_shape=(384, 512),
+        is_train=False,
+    ):
+        B, T, C_event, H, W = events.shape
+        _, N, _ = queries.shape
+        _, _, C_img, _, _ = rgbs.shape
+        device = queries.device
+        if B != 1:
+            raise AssertionError("TAPFormerCowDense_online expects batch_size == 1")
+
+        queries = queries.clone()
+        if isinstance(rgbs, torch.Tensor) and isinstance(events, torch.Tensor):
+            rgbs_flat = rgbs.reshape(B * T, C_img, H, W)
+            events_flat = events.reshape(B * T, C_event, H, W)
+            rgbs_flat = F.interpolate(rgbs_flat, tuple(interp_shape), mode="bilinear", align_corners=True)
+            events_flat = F.interpolate(events_flat, tuple(interp_shape), mode="bilinear", align_corners=True)
+            rgbs = rgbs_flat.reshape(B, T, C_img, interp_shape[0], interp_shape[1])
+            events = events_flat.reshape(B, T, C_event, interp_shape[0], interp_shape[1])
+
+        queries[:, :, 1] *= (interp_shape[1] - 1) / (W - 1)
+        queries[:, :, 2] *= (interp_shape[0] - 1) / (H - 1)
+        if torch.any(queries[:, :, 0].long() != 0):
+            raise ValueError(
+                "TAPFormerCowDense_online expects query frames to be 0. "
+                "Use a config with dataset.sample_vis_1st_frame: true."
+            )
+
+        coords_predicted = torch.zeros((B, T, N, 2), device=device, dtype=queries.dtype)
+        vis_predicted = torch.zeros((B, T, N), device=device, dtype=queries.dtype)
+        conf_predicted = torch.zeros((B, T, N), device=device, dtype=queries.dtype)
+
+        S = int(self.window_size)
+        step = max(1, S // 2)
+        indices = range(0, max(T - 1, 0) + step, step)
+        for ind in indices:
+            if ind >= T:
+                break
+            end = min(ind + S, T)
+            if ind == 0:
+                frame_indices = list(range(ind, end))
+                output_offset = 0
+            else:
+                frame_indices = [0] + list(range(ind, end))
+                output_offset = 1
+
+            rgbs_seq = rgbs[:, frame_indices]
+            events_seq = events[:, frame_indices]
+            img_ifnew_seq = self._slice_img_ifnew(img_ifnew, frame_indices, rgbs.device, rgbs.dtype)
+
+            traj, vis, conf, _ = TAPFormerCowDense.forward(
+                self,
+                rgbs=rgbs_seq,
+                events=events_seq,
+                queries=queries,
+                iters=iters,
+                img_ifnew=img_ifnew_seq,
+                is_train=False,
+            )
+            write_len = end - ind
+            coords_predicted[:, ind:end] = traj[:, output_offset : output_offset + write_len]
+            vis_predicted[:, ind:end] = vis[:, output_offset : output_offset + write_len]
+            conf_predicted[:, ind:end] = conf[:, output_offset : output_offset + write_len]
+
+        return coords_predicted, vis_predicted, conf_predicted

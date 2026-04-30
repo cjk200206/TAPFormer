@@ -1,0 +1,58 @@
+# Configuration file for Kubric/ETAP visualization with TAPFormer fusion + CoW-style dense head
+
+ckpt_root: "output/train_kubric_cow_dense/best.pth"
+
+dataset:
+  data_root: "data/event_kubric/test"
+  representation: "time_surfaces_v2_5"
+  seq_len: 95
+  traj_per_sample: 256
+  height: 384
+  width: 512
+  sample_vis_1st_frame: true
+  choose_long_point: false
+  use_augs: false
+  if_test: true
+
+model:
+  name: "tapformer_cow_dense"
+  backbone: "basic"
+  window_size: 16
+  stride: 4
+  corr_levels: 3
+  corr_radius: 3
+  hidden_size: 384
+  space_depth: 3
+  time_depth: 3
+  cow_head_iters: 4
+  cow_refine_model: "vits"
+  cow_refine_patch_size: 8
+  cow_refine_blocks: null
+  cow_temporal_interleave_stride: 2
+
+predictor:
+  n_iters: 3
+  grid_size: 0
+  local_grid_size: 0
+  single_point: false
+  sift_size: 0
+  num_uniformly_sampled_pts: 0
+  local_extent: 50
+  if_test: true
+
+eval:
+  seq_names: []
+  start_index: 0
+  max_seqs: 5
+
+visualization:
+  output_dir: "output/eval_kubric_cow_dense"
+  enable: true
+  video_model: "events"
+  use_clear_video: true
+  use_gt_as_prediction: false
+  visibility_threshold: 0.8
+  fps: 20
+  linewidth: 2
+  mode: "rainbow"
+  tracks_leave_trace: 16
