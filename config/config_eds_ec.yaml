@@ -28,6 +28,7 @@ corr_radius: 3
 hidden_size: 384
 space_depth: 3
 time_depth: 3
+input_mode: "fusion"  # fusion | frame | event
 
 # Evaluation settings
 eds:
@@ -52,4 +53,3 @@ output:
   base_dir: "output/eval"  # Base directory for outputs
   eds_dir: "output/eval_eds_subseq"  # Directory for EDS outputs
   ec_dir: "output/eval_ec_subseq"  # Directory for EC outputs
-

@@ -31,6 +31,7 @@ class TAPFormerLoss(nn.Module):
     def __init__(
         self,
         coord_weight: float = 1.0,
+        invisible_coord_weight: float = 0.0,
         visibility_weight: float = 1.0,
         confidence_weight: float = 1.0,
         iter_gamma: float = 0.8,
@@ -41,6 +42,7 @@ class TAPFormerLoss(nn.Module):
     ) -> None:
         super().__init__()
         self.coord_weight = float(coord_weight)
+        self.invisible_coord_weight = float(invisible_coord_weight)
         self.visibility_weight = float(visibility_weight)
         self.confidence_weight = float(confidence_weight)
         self.iter_gamma = float(iter_gamma)
@@ -63,6 +65,7 @@ class TAPFormerLoss(nn.Module):
             return {
                 "loss": zero,
                 "coord_loss": zero,
+                "invisible_coord_loss": zero,
                 "visibility_loss": zero,
                 "confidence_loss": zero,
             }
@@ -76,6 +79,7 @@ class TAPFormerLoss(nn.Module):
         window_starts = [i * step for i in range(len(all_coords_predictions))]
 
         coord_loss_total = gt_trajectory.new_zeros(())
+        invisible_coord_loss_total = gt_trajectory.new_zeros(())
         vis_loss_total = gt_trajectory.new_zeros(())
         conf_loss_total = gt_trajectory.new_zeros(())
 
@@ -96,8 +100,10 @@ class TAPFormerLoss(nn.Module):
             flow_valid = gt_valid_w.clone()
             if self.loss_only_for_visible:
                 flow_valid = flow_valid * gt_vis_w
+            invisible_flow_valid = gt_valid_w * (1.0 - gt_vis_w)
 
             coord_loss_w = gt_trajectory.new_zeros(())
+            invisible_coord_loss_w = gt_trajectory.new_zeros(())
             vis_loss_w = gt_trajectory.new_zeros(())
             conf_loss_w = gt_trajectory.new_zeros(())
 
@@ -113,6 +119,12 @@ class TAPFormerLoss(nn.Module):
                     flow_elem = (pred_coords - gt_traj_w).abs()
                 flow_elem = flow_elem.mean(dim=-1)
                 coord_loss_w = coord_loss_w + i_weight * _masked_mean(flow_elem, flow_valid)
+
+                invisible_flow_elem = (pred_coords - gt_traj_w).abs().mean(dim=-1)
+                invisible_coord_loss_w = invisible_coord_loss_w + i_weight * _masked_mean(
+                    invisible_flow_elem,
+                    invisible_flow_valid,
+                )
 
                 vis_bce = F.binary_cross_entropy_with_logits(
                     pred_vis_logits,
@@ -132,16 +144,19 @@ class TAPFormerLoss(nn.Module):
                 conf_loss_w = conf_loss_w + _masked_mean(conf_bce, conf_mask)
 
             coord_loss_total = coord_loss_total + (coord_loss_w / n_predictions)
+            invisible_coord_loss_total = invisible_coord_loss_total + (invisible_coord_loss_w / n_predictions)
             vis_loss_total = vis_loss_total + (vis_loss_w / n_predictions)
             conf_loss_total = conf_loss_total + (conf_loss_w / n_predictions)
 
         norm = max(1, len(all_coords_predictions))
         coord_loss_total = coord_loss_total / norm
+        invisible_coord_loss_total = invisible_coord_loss_total / norm
         vis_loss_total = vis_loss_total / norm
         conf_loss_total = conf_loss_total / norm
 
         total_loss = (
             self.coord_weight * coord_loss_total
+            + self.invisible_coord_weight * invisible_coord_loss_total
             + self.visibility_weight * vis_loss_total
             + self.confidence_weight * conf_loss_total
         )
@@ -149,6 +164,7 @@ class TAPFormerLoss(nn.Module):
         return {
             "loss": total_loss,
             "coord_loss": coord_loss_total,
+            "invisible_coord_loss": invisible_coord_loss_total,
             "visibility_loss": vis_loss_total,
             "confidence_loss": conf_loss_total,
         }

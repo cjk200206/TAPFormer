@@ -34,6 +34,7 @@ corr_radius: 3
 hidden_size: 384
 space_depth: 3
 time_depth: 3
+input_mode: "fusion"  # fusion | frame | event
 
 # Evaluation settings
 dt: 0.0100
@@ -49,4 +50,3 @@ output:
   save_results: false  # Set to true to save results
   save_trajectory: false  # Set to true to save trajectory files
   base_dir: "output/eval_aedat4_subseq"  # Base directory for outputs
-

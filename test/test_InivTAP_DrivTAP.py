@@ -73,6 +73,7 @@ enable_visualization = vis_cfg.get('enable', False)
 save_results = output_cfg.get('save_results', False)
 save_trajectory = output_cfg.get('save_trajectory', False)
 base_output_dir = output_cfg.get('base_dir', 'output/eval_InivTAP_DrivTAP_subseq')
+input_mode = config.get('input_mode', 'fusion')
 
 # ========== Model Initialization ==========
 print("Loading model...")
@@ -94,6 +95,7 @@ if "model" in state_dict:
 model.load_state_dict(state_dict, strict=False)
 model.eval()
 print("Model loaded successfully!")
+print(f"Input mode: {input_mode}")
 
 # ========== Evaluation ==========
 print("\n" + "="*50)
@@ -126,6 +128,7 @@ for seq_name, dataset_type in EVAL_DATASETS:
                 single_point=False,
                 num_uniformly_sampled_pts=0,
                 n_iters=n_iters,
+                input_mode=input_mode,
             )
     
     if torch.cuda.is_available():

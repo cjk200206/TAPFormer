@@ -102,7 +102,6 @@ def build_model_from_config(model_cfg):
         )
     if model_name in {"tapformer_cow_dense", "cow_dense"}:
         return TAPFormerCowDense(
-            cow_head_iters=int(model_cfg.get("cow_head_iters", 4)),
             cow_refine_model=str(model_cfg.get("cow_refine_model", "vits")),
             cow_refine_patch_size=int(model_cfg.get("cow_refine_patch_size", 4)),
             cow_refine_blocks=model_cfg.get("cow_refine_blocks", None),
@@ -140,6 +139,55 @@ def metric_sign(mode: str):
     if mode_norm == "max":
         return 1.0
     raise ValueError(f"Unsupported best_mode={mode}. Use one of: min, max.")
+
+
+def build_scheduler(optimizer, scheduler_cfg, total_steps: int):
+    if not scheduler_cfg or not bool(scheduler_cfg.get("enabled", False)):
+        return None
+
+    scheduler_type = str(scheduler_cfg.get("type", "cosine")).lower().strip()
+    if scheduler_type != "cosine":
+        raise ValueError(f"Unsupported scheduler.type={scheduler_type}. Use: cosine")
+
+    step_on = str(scheduler_cfg.get("step_on", "step")).lower().strip()
+    if step_on != "step":
+        raise ValueError(f"Unsupported scheduler.step_on={step_on}. Use: step")
+
+    total_steps = max(1, int(total_steps))
+    if "warmup_steps" in scheduler_cfg:
+        warmup_steps = int(scheduler_cfg.get("warmup_steps", 0))
+    else:
+        warmup_ratio = float(scheduler_cfg.get("warmup_ratio", 0.0))
+        warmup_steps = int(total_steps * warmup_ratio)
+    warmup_steps = max(0, min(warmup_steps, total_steps - 1))
+
+    min_lr = float(scheduler_cfg.get("min_lr", 0.0))
+    cosine_steps = max(1, total_steps - warmup_steps)
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=cosine_steps,
+        eta_min=min_lr,
+    )
+
+    if warmup_steps == 0:
+        return cosine_scheduler
+
+    start_factor = 1.0 / float(warmup_steps) if warmup_steps > 1 else 1.0
+    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=start_factor,
+        end_factor=1.0,
+        total_iters=warmup_steps,
+    )
+    return torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_steps],
+    )
+
+
+def get_current_lr(optimizer) -> float:
+    return float(optimizer.param_groups[0]["lr"])
 
 
 def main():
@@ -195,22 +243,37 @@ def main():
 
     criterion = TAPFormerLoss(
         coord_weight=float(loss_cfg.get("coord_weight", 0.1)),
+        invisible_coord_weight=float(loss_cfg.get("invisible_coord_weight", 0.0)),
         visibility_weight=float(loss_cfg.get("visibility_weight", 1.0)),
         confidence_weight=float(loss_cfg.get("confidence_weight", 1.0)),
         iter_gamma=float(loss_cfg.get("iter_gamma", 0.8)),
         confidence_threshold=float(loss_cfg.get("confidence_threshold", 8.0)),
+        add_huber_loss=bool(loss_cfg.get("add_huber_loss", False)),
+        huber_delta=float(loss_cfg.get("huber_delta", 6.0)),
+        loss_only_for_visible=bool(loss_cfg.get("loss_only_for_visible", False)),
     ).to(device)
 
+    base_lr = float(train_cfg.get("lr", 5e-4))
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=float(train_cfg.get("lr", 5e-4)),
+        lr=base_lr,
         weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
+    )
+
+    epochs = int(train_cfg.get("epochs", 40))
+    scheduler_cfg = train_cfg.get("scheduler", {})
+    total_steps = epochs * len(loader)
+    scheduler = build_scheduler(
+        optimizer=optimizer,
+        scheduler_cfg=scheduler_cfg,
+        total_steps=total_steps,
     )
 
     precision = train_cfg.get("precision", "bf16")
     scaler = torch.cuda.amp.GradScaler(enabled=(precision == "fp16" and device.type == "cuda"))
 
     start_epoch = 0
+    global_step = 0
     pretrained_path = train_cfg.get("pretrained", None)
     pretrained_strict = bool(train_cfg.get("pretrained_strict", False))
     if pretrained_path:
@@ -231,8 +294,15 @@ def main():
         model.load_state_dict(model_state, strict=False)
         if "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
+        if scheduler is not None and "scheduler" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = int(ckpt.get("epoch", -1)) + 1
-        print(f"Resumed training from {resume_path} at epoch {start_epoch}", flush=True)
+        global_step = int(ckpt.get("global_step", 0))
+        print(
+            f"Resumed training from {resume_path} at epoch {start_epoch} "
+            f"(global_step={global_step})",
+            flush=True,
+        )
 
     if precision == "bf16":
         autocast_dtype = torch.bfloat16
@@ -242,9 +312,8 @@ def main():
         autocast_dtype = None
 
     model.train()
-    global_step = 0
-    epochs = int(train_cfg.get("epochs", 40))
     iters = int(train_cfg.get("iters", 4))
+    grad_clip_norm = float(train_cfg.get("grad_clip_norm", 0.0) or 0.0)
     log_every = int(train_cfg.get("log_every", 10))
     save_every_epochs = int(train_cfg.get("save_every_epochs", 1))
     save_last = bool(train_cfg.get("save_last", True))
@@ -266,7 +335,7 @@ def main():
             best_sign = metric_sign(best_mode)
 
     for epoch in range(start_epoch, epochs):
-        running = {"loss": 0.0, "coord_loss": 0.0, "visibility_loss": 0.0, "confidence_loss": 0.0}
+        running = {"loss": 0.0, "coord_loss": 0.0, "invisible_coord_loss": 0.0, "visibility_loss": 0.0, "confidence_loss": 0.0}
         n_steps = 0
 
         for sample, gotit in loader:
@@ -299,11 +368,18 @@ def main():
 
             if precision == "fp16" and device.type == "cuda":
                 scaler.scale(loss).backward()
+                if grad_clip_norm > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
+                if grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
                 optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
             n_steps += 1
             global_step += 1
@@ -313,8 +389,10 @@ def main():
             if global_step % log_every == 0:
                 msg = (
                     f"epoch={epoch} step={global_step} "
+                    f"lr={get_current_lr(optimizer):.6e} "
                     f"loss={running['loss']/max(1,n_steps):.4f} "
                     f"coord={running['coord_loss']/max(1,n_steps):.4f} "
+                    f"inv_coord={running['invisible_coord_loss']/max(1,n_steps):.4f} "
                     f"vis={running['visibility_loss']/max(1,n_steps):.4f} "
                     f"conf={running['confidence_loss']/max(1,n_steps):.4f}"
                 )
@@ -324,6 +402,7 @@ def main():
             "epoch": epoch,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "config": cfg,
             "global_step": global_step,
             "best_metric": best_metric,
@@ -350,6 +429,7 @@ def main():
                     "epoch": epoch,
                     "model": model.state_dict(),
                     "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict() if scheduler is not None else None,
                     "config": cfg,
                     "global_step": global_step,
                     "best_metric": best_metric,
@@ -366,6 +446,7 @@ def main():
             print(
                 f"[Epoch {epoch}] loss={running['loss']/n_steps:.4f}, "
                 f"coord={running['coord_loss']/n_steps:.4f}, "
+                f"inv_coord={running['invisible_coord_loss']/n_steps:.4f}, "
                 f"vis={running['visibility_loss']/n_steps:.4f}, "
                 f"conf={running['confidence_loss']/n_steps:.4f}",
                 flush=True,
@@ -377,6 +458,7 @@ def main():
             "epoch": final_epoch,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "config": cfg,
             "global_step": global_step,
             "best_metric": best_metric,

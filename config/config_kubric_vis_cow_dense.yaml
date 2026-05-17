@@ -24,7 +24,6 @@ model:
   hidden_size: 384
   space_depth: 3
   time_depth: 3
-  cow_head_iters: 4
   cow_refine_model: "vits"
   cow_refine_patch_size: 8
   cow_refine_blocks: null

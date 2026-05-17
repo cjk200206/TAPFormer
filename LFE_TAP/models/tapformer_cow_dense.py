@@ -22,7 +22,6 @@ class TAPFormerCowDense(nn.Module):
         hidden_size=384,
         space_depth=3,
         time_depth=3,
-        cow_head_iters=4,
         cow_refine_model="vits",
         cow_refine_patch_size=4,
         cow_refine_blocks=None,
@@ -44,7 +43,6 @@ class TAPFormerCowDense(nn.Module):
         self.dense_head = DenseWarpTrackingHead(
             feature_dim=self.latent_dim,
             down_ratio=self.stride,
-            warp_iters=cow_head_iters,
             refine_model=cow_refine_model,
             refine_patch_size=cow_refine_patch_size,
             refine_blocks=cow_refine_blocks,
@@ -83,7 +81,7 @@ class TAPFormerCowDense(nn.Module):
     def _sample_dense_scalar(self, dense: torch.Tensor, query_xy: torch.Tensor) -> torch.Tensor:
         return self._sample_dense(dense.unsqueeze(-1), query_xy)[..., 0]
 
-    def forward(self, rgbs, events, queries, iters=4, img_ifnew=None, feat_init=None, is_train=False):
+    def forward(self, rgbs, events, queries, iters=None, img_ifnew=None, feat_init=None, is_train=False):
         B, T, C_event, H, W = events.shape
         _, N, _ = queries.shape
         _, _, C_img, _, _ = rgbs.shape
@@ -91,6 +89,8 @@ class TAPFormerCowDense(nn.Module):
             raise AssertionError("TAPFormerCowDense currently follows TAPFormer training and expects batch_size == 1")
         if H % self.stride != 0 or W % self.stride != 0:
             raise AssertionError("Input height/width must be divisible by model.stride")
+        if iters is None:
+            raise ValueError("TAPFormerCowDense.forward requires an explicit iters argument.")
 
         queried_frames = queries[:, :, 0].long()
         if torch.any(queried_frames != 0):

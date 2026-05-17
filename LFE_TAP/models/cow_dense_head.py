@@ -32,7 +32,6 @@ class DenseWarpTrackingHead(nn.Module):
         self,
         feature_dim: int,
         down_ratio: int = 4,
-        warp_iters: int = 4,
         refine_model: str = "vits",
         refine_patch_size: int = 4,
         refine_blocks: Optional[int] = None,
@@ -42,7 +41,6 @@ class DenseWarpTrackingHead(nn.Module):
         if refine_model not in MODEL_CONFIGS:
             raise ValueError(f"Unsupported cow refine model: {refine_model}")
         self.down_ratio = int(down_ratio)
-        self.warp_iters = int(warp_iters)
         self.iter_dim = MODEL_CONFIGS[refine_model]["features"]
 
         self.fmap_conv = nn.Conv2d(feature_dim, self.iter_dim, 1)
@@ -105,7 +103,9 @@ class DenseWarpTrackingHead(nn.Module):
 
     def forward(self, features: torch.Tensor, image_size: Tuple[int, int], iters: Optional[int] = None):
         B, T, _, H, W = features.shape
-        n_iters = self.warp_iters if iters is None else int(iters)
+        if iters is None:
+            raise ValueError("DenseWarpTrackingHead.forward requires an explicit iters argument.")
+        n_iters = int(iters)
 
         fmap = self.fmap_conv(features.reshape(B * T, -1, H, W)).view(B, T, self.iter_dim, H, W)
         frame0 = fmap[:, 0:1].expand(B, T, -1, -1, -1)

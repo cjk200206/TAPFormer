@@ -20,6 +20,7 @@ class EvaluationPredictor(torch.nn.Module):
         n_iters: int = 6,
         local_extent: int = 50,
         if_test: bool = False,
+        input_mode: str = "fusion",
     ) -> None:
         super(EvaluationPredictor, self).__init__()
         self.model = model
@@ -32,7 +33,37 @@ class EvaluationPredictor(torch.nn.Module):
         self.n_iters = n_iters
         self.local_extent = local_extent
         self.if_test = if_test
+        self.input_mode = self._normalize_input_mode(input_mode)
         self.model.eval()
+
+    @staticmethod
+    def _normalize_input_mode(input_mode: str) -> str:
+        mode = str(input_mode).lower().strip()
+        if mode in {"fusion", "fused", "both", "frame_event", "rgb_event"}:
+            return "fusion"
+        if mode in {"frame", "frames", "rgb", "image", "images"}:
+            return "frame"
+        if mode in {"event", "events"}:
+            return "event"
+        raise ValueError(
+            f"Unsupported input_mode={input_mode}. "
+            "Use one of: fusion, frame, event."
+        )
+
+    def _apply_input_mode(self, video, events):
+        if self.input_mode == "fusion":
+            return video, events
+        if self.input_mode == "frame":
+            if isinstance(events, torch.Tensor):
+                events = torch.full_like(events, 0)
+            else:
+                events = np.full(events.shape, 0, dtype=np.float32)
+            return video, events
+        if isinstance(video, torch.Tensor):
+            video = torch.full_like(video, 127.5)
+        else:
+            video = np.full(video.shape, 127.5, dtype=np.float32)
+        return video, events
     
     def forward(self, video, events, queries=None, img_ifnew=None):
         B, T, C_r, H, W = video.shape
@@ -63,18 +94,19 @@ class EvaluationPredictor(torch.nn.Module):
             events = F.interpolate(events, tuple(interp_shape), mode="bilinear", align_corners=True)
             video = video.reshape(B, T, C_r, interp_shape[0], interp_shape[1])
             events = events.reshape(B, T, C_e, interp_shape[0], interp_shape[1])
-        
+
         queries[:, :, 1] *= (interp_shape[1] - 1) / (W - 1)
         queries[:, :, 2] *= (interp_shape[0] - 1) / (H - 1)
         
         if self.single_point:
+            model_video, model_events = self._apply_input_mode(video, events)
             traj_e = torch.zeros((B, T, N, 2), device=device)
             vis_e = torch.zeros((B, T, N), device=device)
             conf_e = torch.zeros((B, T, N), device=device)
             
             for pind in range((N)):
                 querie = queries[:, pind : pind + 1]
-                traj_e_pind, vis_e_pind, conf_e_pind = self._process_one_point(video[:,:], events[:,:], querie, img_ifnew=img_ifnew)
+                traj_e_pind, vis_e_pind, conf_e_pind = self._process_one_point(model_video[:,:], model_events[:,:], querie, img_ifnew=img_ifnew)
                 traj_e[:, :, pind:pind+1] = traj_e_pind[:, :, :1]
                 vis_e[:, :, pind:pind+1] = vis_e_pind[:, :, :1]
                 conf_e[:, :, pind:pind+1] = conf_e_pind[:, :, :1]
@@ -101,7 +133,8 @@ class EvaluationPredictor(torch.nn.Module):
                 else:
                     sift_size = 0 
         
-            preds = self.model(rgbs=video, events=events, queries=queries, iters=self.n_iters, img_ifnew=img_ifnew)
+            model_video, model_events = self._apply_input_mode(video, events)
+            preds = self.model(rgbs=model_video, events=model_events, queries=queries, iters=self.n_iters, img_ifnew=img_ifnew)
             traj_e, vis_e = preds[0], preds[1]
                 
             conf_e = preds[2]

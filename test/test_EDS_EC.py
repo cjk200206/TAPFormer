@@ -74,6 +74,7 @@ output_cfg = config.get('output', {})
 enable_visualization = vis_cfg.get('enable', False)
 save_results = output_cfg.get('save_results', False)
 save_trajectory = output_cfg.get('save_trajectory', False)
+input_mode = config.get('input_mode', 'fusion')
 
 # ========== Model Initialization ==========
 print("Loading model...")
@@ -95,6 +96,7 @@ if "model" in state_dict:
 model.load_state_dict(state_dict, strict=False)
 model.eval()
 print("Model loaded successfully!")
+print(f"Input mode: {input_mode}")
 
 # ========== Evaluation on EDS Dataset ==========
 print("\n" + "="*50)
@@ -127,6 +129,7 @@ for seq_name in EVAL_DATASETS_EDS:
                 num_uniformly_sampled_pts=0,
                 n_iters=eds_cfg['n_iters'],
                 if_test=True,
+                input_mode=input_mode,
             )
     
     if torch.cuda.is_available():
@@ -232,6 +235,7 @@ for seq_name in EVAL_DATASETS_EC:
                 num_uniformly_sampled_pts=0,
                 n_iters=ec_cfg['n_iters'],
                 if_test=True,
+                input_mode=input_mode,
             )
     
     if torch.cuda.is_available():

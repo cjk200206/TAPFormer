@@ -79,7 +79,6 @@ def build_model_from_config(model_cfg):
     )
     if model_name in {"tapformer_cow_dense", "cow_dense"}:
         return TAPFormerCowDense_online(
-            cow_head_iters=int(model_cfg.get("cow_head_iters", 4)),
             cow_refine_model=str(model_cfg.get("cow_refine_model", "vits")),
             cow_refine_patch_size=int(model_cfg.get("cow_refine_patch_size", 4)),
             cow_refine_blocks=model_cfg.get("cow_refine_blocks", None),
@@ -133,6 +132,7 @@ def main():
         n_iters=int(pred_cfg.get("n_iters", 6)),
         local_extent=int(pred_cfg.get("local_extent", 50)),
         if_test=bool(pred_cfg.get("if_test", True)),
+        input_mode=pred_cfg.get("input_mode", "fusion"),
     )
 
     if torch.cuda.is_available():
@@ -166,6 +166,7 @@ def main():
     use_gt_as_prediction = bool(vis_cfg.get("use_gt_as_prediction", True))
 
     print(f"Using device: {DEFAULT_DEVICE}")
+    print(f"Input mode: {predictor.input_mode}")
     print(f"Selected {len(seq_indices)} sequences for visualization")
 
     for idx in seq_indices:
