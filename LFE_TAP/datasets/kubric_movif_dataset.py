@@ -789,6 +789,7 @@ class KubricMovifDataset_etap(FETAPDataset):
         choose_long_point=False,
         use_augs=False,
         if_test=False,
+        resample_max_tries=8,
     ):
         super(KubricMovifDataset_etap, self).__init__(
             root_dir=root_dir,
@@ -809,6 +810,7 @@ class KubricMovifDataset_etap(FETAPDataset):
         self.resize_delta = 0.05
         self.max_crop_offset = 15
         self.if_test = if_test
+        self.resample_max_tries = max(1, int(resample_max_tries))
         self.seq_names = [
             os.path.join(self.root_dir, fname)
             for fname in os.listdir(self.root_dir)
@@ -816,33 +818,43 @@ class KubricMovifDataset_etap(FETAPDataset):
         ]
         print("found %d unique seqences in %s" % (len(self.seq_names), self.root_dir))
 
-    def getitem_helper(self, index):
-        gotit = True
-        seq_name = self.seq_names[index]
-
+    def _load_sequence_data(self, seq_name):
         npy_path = os.path.join(seq_name, "annotations.npy")
         rgb_dir_path = os.path.join(seq_name, "raw")
         event_dir_path = os.path.join(seq_name, "events", self.representation)
-
         raw_files = sorted(os.listdir(rgb_dir_path))
         rgb_files = [f for f in raw_files if f.startswith("rgba_blur_") and f.endswith(".png")]
         clear_rgb_files = [
             f for f in raw_files if f.startswith("rgba_") and not f.startswith("rgba_blur_") and f.endswith(".png")
         ]
         event_files = sorted(os.listdir(event_dir_path))
+        annot_dict = np.load(npy_path, allow_pickle=True).item()
+        return rgb_dir_path, event_dir_path, rgb_files, clear_rgb_files, event_files, annot_dict
 
+    def _build_sample_from_window(
+        self,
+        seq_name,
+        rgb_dir_path,
+        event_dir_path,
+        rgb_files_all,
+        clear_rgb_files_all,
+        event_files_all,
+        annot_dict,
+        random_id=None,
+    ):
+        gotit = True
         rgb_imgs = []
         img_ifnew = []
         clear_rgb_imgs = []
         event_imgs = []
         if not self.if_test:
-            random_id = np.random.randint(0, 95 - 24)
-            rgb_files = rgb_files[random_id: random_id + 24]
-            event_files = event_files[random_id: random_id + 24]
-            clear_rgb_files = clear_rgb_files[random_id: random_id + 24]
+            rgb_files = rgb_files_all[random_id: random_id + self.seq_len]
+            event_files = event_files_all[random_id: random_id + self.seq_len]
+            clear_rgb_files = clear_rgb_files_all[random_id: random_id + self.seq_len]
         else:
-            rgb_files = rgb_files[:-1]
-            clear_rgb_files = clear_rgb_files[:-1]
+            rgb_files = rgb_files_all[:-1]
+            event_files = event_files_all
+            clear_rgb_files = clear_rgb_files_all[:-1]
 
         next_insert = 0
         for i, img_path in enumerate(rgb_files):
@@ -863,8 +875,7 @@ class KubricMovifDataset_etap(FETAPDataset):
             except Exception as e:
                 print(f"error reading image at path:{img_path}_{rgb_dir_path}")
                 print(f"error mrssage:{str(e)}")
-                gotit = False
-                return [], gotit
+                return [], False, 0, random_id
 
         for i, img_path in enumerate(clear_rgb_files):
             try:
@@ -875,8 +886,7 @@ class KubricMovifDataset_etap(FETAPDataset):
             except Exception as e:
                 print(f"error reading image at path:{img_path}_{rgb_dir_path}")
                 print(f"error mrssage:{str(e)}")
-                gotit = False
-                return [], gotit
+                return [], False, 0, random_id
 
         for i, event_path in enumerate(event_files):
             try:
@@ -884,16 +894,14 @@ class KubricMovifDataset_etap(FETAPDataset):
             except Exception as e:
                 print(f"error reading event at path:{event_path}_{event_dir_path}")
                 print(f"error mrssage:{str(e)}")
-                gotit = False
-                return [], gotit
+                return [], False, 0, random_id
 
         rgbs = np.stack(rgb_imgs)
         clear_rgbs = np.stack(clear_rgb_imgs)
         events = np.stack(event_imgs)
-        annot_dict = np.load(npy_path, allow_pickle=True).item()
         if not self.if_test:
-            traj_2d = annot_dict["target_points"][:, random_id: random_id + 24]
-            visibility = annot_dict["occluded"][:, random_id: random_id + 24]
+            traj_2d = annot_dict["target_points"][:, random_id: random_id + self.seq_len]
+            visibility = annot_dict["occluded"][:, random_id: random_id + self.seq_len]
         else:
             traj_2d = annot_dict["target_points"][:, :-1]
             visibility = annot_dict["occluded"][:, :-1]
@@ -935,11 +943,11 @@ class KubricMovifDataset_etap(FETAPDataset):
                 (visibile_pts_first_frame_inds, visiblile_pts_mid_frame_inds, visibile_pts_last_frame_inds), dim=0
             )
 
-        point_inds = torch.randperm(len(visiblile_pts_inds))[:self.traj_per_sample]
-        if len(point_inds) < self.traj_per_sample and not self.if_test:
-            print(seq_name, "get point num ", len(point_inds), "less than ", self.traj_per_sample, " random_id is", random_id)
-            gotit = False
+        candidate_count = len(visiblile_pts_inds)
+        if candidate_count < self.traj_per_sample and not self.if_test:
+            return [], False, candidate_count, random_id
 
+        point_inds = torch.randperm(candidate_count)[:self.traj_per_sample]
         if self.choose_long_point:
             distance = np.linalg.norm(
                 traj_2d[-1, visiblile_pts_inds, :] - traj_2d[0, visiblile_pts_inds, :], axis=-1
@@ -975,7 +983,54 @@ class KubricMovifDataset_etap(FETAPDataset):
             clear_video=clear_rgbs,
         )
         assert sample.img_ifnew is not None, "发现空值样本"
-        return sample, gotit
+        return sample, gotit, candidate_count, random_id
+
+    def getitem_helper(self, index):
+        seq_name = self.seq_names[index]
+        rgb_dir_path, event_dir_path, rgb_files, clear_rgb_files, event_files, annot_dict = self._load_sequence_data(seq_name)
+
+        if self.if_test:
+            sample, gotit, _, _ = self._build_sample_from_window(
+                seq_name,
+                rgb_dir_path,
+                event_dir_path,
+                rgb_files,
+                clear_rgb_files,
+                event_files,
+                annot_dict,
+            )
+            return sample, gotit
+
+        max_start = 95 - self.seq_len
+        last_candidate_count = 0
+        last_random_id = None
+        for _ in range(self.resample_max_tries):
+            random_id = np.random.randint(0, max_start)
+            sample, gotit, candidate_count, sampled_random_id = self._build_sample_from_window(
+                seq_name,
+                rgb_dir_path,
+                event_dir_path,
+                rgb_files,
+                clear_rgb_files,
+                event_files,
+                annot_dict,
+                random_id=random_id,
+            )
+            if gotit:
+                return sample, True
+            last_candidate_count = candidate_count
+            last_random_id = sampled_random_id
+
+        print(
+            seq_name,
+            "get point num ",
+            last_candidate_count,
+            "less than ",
+            self.traj_per_sample,
+            " random_id is",
+            last_random_id,
+        )
+        return [], False
 
     def __len__(self):
         return len(self.seq_names)
