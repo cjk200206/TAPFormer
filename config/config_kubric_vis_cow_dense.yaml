@@ -1,6 +1,6 @@
 # Configuration file for Kubric/ETAP visualization with TAPFormer fusion + CoW-style dense head
 
-ckpt_root: "output/train_kubric_cow_dense/best.pth"
+ckpt_root: "output/train_kubric_cow_dense_v1/best_0522.pth"
 
 dataset:
   data_root: "data/event_kubric/test"
@@ -25,12 +25,17 @@ model:
   space_depth: 3
   time_depth: 3
   cow_refine_model: "vits"
-  cow_refine_patch_size: 8
+  cow_refine_patch_size: 4
   cow_refine_blocks: null
   cow_temporal_interleave_stride: 2
+  cow_tracking_down_ratio: 2
+  cow_limit_flow: false
+  cow_max_flow_update_ratio: 0.15
+  cow_max_flow_magnitude_ratio: 1.0
+  cow_refine_checkpoint: true
 
 predictor:
-  n_iters: 3
+  n_iters: 5
   grid_size: 0
   local_grid_size: 0
   single_point: false

@@ -3,25 +3,26 @@
 dataset:
   data_root: "data/event_kubric/test"
   representation: "time_surfaces_v2_5"
-  seq_len: 24
-  traj_per_sample: 128
+  seq_len: 12
+  traj_per_sample: 384
+  resample_max_tries: 8
   height: 384
   width: 512
   sample_vis_1st_frame: true
-  choose_long_point: false
+  choose_long_point: true
   use_augs: false
   if_test: false
 
 train:
-  save_dir: "output/train_kubric_cow_dense"
+  save_dir: "output/train_kubric_cow_dense_v1"
   epochs: 200
   batch_size: 1
-  num_workers: 4
+  num_workers: 8
   shuffle: true
   pin_memory: true
   drop_last: true
   # lr: 0.0005
-  lr: 0.0003
+  lr: 0.0002
   weight_decay: 0.0001
   grad_clip_norm: 1.0
   scheduler:
@@ -54,9 +55,14 @@ model:
   space_depth: 3
   time_depth: 3
   cow_refine_model: "vits"
-  cow_refine_patch_size: 8
+  cow_refine_patch_size: 4
   cow_refine_blocks: null
   cow_temporal_interleave_stride: 2
+  cow_tracking_down_ratio: 2
+  cow_limit_flow: false
+  cow_max_flow_update_ratio: 0.15
+  cow_max_flow_magnitude_ratio: 1.0
+  cow_refine_checkpoint: true
 
 loss:
   coord_weight: 0.05

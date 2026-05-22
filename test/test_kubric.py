@@ -83,6 +83,11 @@ def build_model_from_config(model_cfg):
             cow_refine_patch_size=int(model_cfg.get("cow_refine_patch_size", 4)),
             cow_refine_blocks=model_cfg.get("cow_refine_blocks", None),
             cow_temporal_interleave_stride=int(model_cfg.get("cow_temporal_interleave_stride", 2)),
+            cow_tracking_down_ratio=int(model_cfg.get("cow_tracking_down_ratio", 2)),
+            cow_limit_flow=bool(model_cfg.get("cow_limit_flow", True)),
+            cow_max_flow_update_ratio=float(model_cfg.get("cow_max_flow_update_ratio", 0.15)),
+            cow_max_flow_magnitude_ratio=float(model_cfg.get("cow_max_flow_magnitude_ratio", 1.0)),
+            cow_refine_checkpoint=bool(model_cfg.get("cow_refine_checkpoint", False)),
             **common_kwargs,
         )
     return TAPFormer_online(**common_kwargs)
