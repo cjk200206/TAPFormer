@@ -329,6 +329,11 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         cow_refine_patch_size=4,
         cow_refine_blocks=None,
         cow_temporal_interleave_stride=2,
+        cow_tracking_down_ratio=2,
+        cow_limit_flow=True,
+        cow_max_flow_update_ratio=0.15,
+        cow_max_flow_magnitude_ratio=1.0,
+        cow_refine_checkpoint=False,
     ):
         if trained_model is not None:
             super().__init__(
@@ -345,6 +350,11 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 cow_refine_patch_size=cow_refine_patch_size,
                 cow_refine_blocks=cow_refine_blocks,
                 cow_temporal_interleave_stride=cow_temporal_interleave_stride,
+                cow_tracking_down_ratio=cow_tracking_down_ratio,
+                cow_limit_flow=cow_limit_flow,
+                cow_max_flow_update_ratio=cow_max_flow_update_ratio,
+                cow_max_flow_magnitude_ratio=cow_max_flow_magnitude_ratio,
+                cow_refine_checkpoint=cow_refine_checkpoint,
             )
             self.fusion_block = trained_model.fusion_block
             self.dense_head = trained_model.dense_head
@@ -363,18 +373,12 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 cow_refine_patch_size=cow_refine_patch_size,
                 cow_refine_blocks=cow_refine_blocks,
                 cow_temporal_interleave_stride=cow_temporal_interleave_stride,
+                cow_tracking_down_ratio=cow_tracking_down_ratio,
+                cow_limit_flow=cow_limit_flow,
+                cow_max_flow_update_ratio=cow_max_flow_update_ratio,
+                cow_max_flow_magnitude_ratio=cow_max_flow_magnitude_ratio,
+                cow_refine_checkpoint=cow_refine_checkpoint,
             )
-
-    def _slice_img_ifnew(self, img_ifnew, indices, device, dtype):
-        if img_ifnew is None:
-            out = torch.ones(len(indices), device=device, dtype=dtype)
-        elif isinstance(img_ifnew, torch.Tensor):
-            out = img_ifnew[indices].to(device=device, dtype=dtype)
-        else:
-            out = torch.as_tensor(np.asarray(img_ifnew)[indices], device=device, dtype=dtype)
-        if len(out) > 0:
-            out[0] = 1
-        return out
 
     @torch.no_grad()
     def forward(
@@ -406,11 +410,14 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
 
         queries[:, :, 1] *= (interp_shape[1] - 1) / (W - 1)
         queries[:, :, 2] *= (interp_shape[0] - 1) / (H - 1)
-        if torch.any(queries[:, :, 0].long() != 0):
-            raise ValueError(
-                "TAPFormerCowDense_online expects query frames to be 0. "
-                "Use a config with dataset.sample_vis_1st_frame: true."
-            )
+        query_xy = self._prepare_query_xy(queries)
+
+        if img_ifnew is None:
+            img_ifnew = torch.ones(T, device=rgbs.device, dtype=rgbs.dtype)
+        elif isinstance(img_ifnew, torch.Tensor):
+            img_ifnew = img_ifnew.to(device=rgbs.device, dtype=rgbs.dtype)
+        else:
+            img_ifnew = torch.as_tensor(np.asarray(img_ifnew), device=rgbs.device, dtype=rgbs.dtype)
 
         coords_predicted = torch.zeros((B, T, N, 2), device=device, dtype=queries.dtype)
         vis_predicted = torch.zeros((B, T, N), device=device, dtype=queries.dtype)
@@ -418,34 +425,53 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
 
         S = int(self.window_size)
         step = max(1, S // 2)
-        indices = range(0, max(T - 1, 0) + step, step)
-        for ind in indices:
+        num_windows = max(1, (max(T - S, 0) + step - 1) // step + 1)
+        prev_end = 0
+        cached_tail = None
+
+        for ind in range(0, step * num_windows, step):
             if ind >= T:
                 break
+
             end = min(ind + S, T)
+            overlap = max(0, prev_end - ind)
             if ind == 0:
-                frame_indices = list(range(ind, end))
-                output_offset = 0
+                window_query_xy = query_xy
+                window_features = self._encode_window_features(
+                    rgbs[:, ind:end],
+                    events[:, ind:end],
+                    img_ifnew=img_ifnew[ind:end],
+                    reset_state=True,
+                )
             else:
-                frame_indices = [0] + list(range(ind, end))
-                output_offset = 1
+                window_query_xy = coords_predicted[:, ind].clone()
+                new_start = ind + overlap
+                new_features = self._encode_window_features(
+                    rgbs[:, new_start:end],
+                    events[:, new_start:end],
+                    img_ifnew=img_ifnew[new_start:end],
+                    reset_state=False,
+                )
+                if cached_tail is None:
+                    raise RuntimeError("cached_tail is required for incremental cow-dense online inference")
+                window_features = torch.cat([cached_tail, new_features], dim=1)
 
-            rgbs_seq = rgbs[:, frame_indices]
-            events_seq = events[:, frame_indices]
-            img_ifnew_seq = self._slice_img_ifnew(img_ifnew, frame_indices, rgbs.device, rgbs.dtype)
-
-            traj, vis, conf, _ = TAPFormerCowDense.forward(
-                self,
-                rgbs=rgbs_seq,
-                events=events_seq,
-                queries=queries,
-                iters=iters,
-                img_ifnew=img_ifnew_seq,
-                is_train=False,
+            traj, vis, conf, _, _, _ = self._forward_window(
+                window_features,
+                window_query_xy,
+                image_size=interp_shape,
+                iters=int(iters),
             )
-            write_len = end - ind
-            coords_predicted[:, ind:end] = traj[:, output_offset : output_offset + write_len]
-            vis_predicted[:, ind:end] = vis[:, output_offset : output_offset + write_len]
-            conf_predicted[:, ind:end] = conf[:, output_offset : output_offset + write_len]
+
+            if overlap > 0:
+                traj[:, :overlap] = coords_predicted[:, ind:ind + overlap]
+                vis[:, :overlap] = vis_predicted[:, ind:ind + overlap]
+                conf[:, :overlap] = conf_predicted[:, ind:ind + overlap]
+
+            coords_predicted[:, ind:end] = traj
+            vis_predicted[:, ind:end] = vis
+            conf_predicted[:, ind:end] = conf
+            cached_tail = window_features[:, -min(step, window_features.shape[1]):].clone()
+            prev_end = end
 
         return coords_predicted, vis_predicted, conf_predicted

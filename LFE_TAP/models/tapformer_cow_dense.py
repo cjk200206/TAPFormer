@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
@@ -26,11 +26,17 @@ class TAPFormerCowDense(nn.Module):
         cow_refine_patch_size=4,
         cow_refine_blocks=None,
         cow_temporal_interleave_stride=2,
+        cow_tracking_down_ratio=2,
+        cow_limit_flow=True,
+        cow_max_flow_update_ratio=0.15,
+        cow_max_flow_magnitude_ratio=1.0,
+        cow_refine_checkpoint=False,
         **_,
     ):
         super().__init__()
         self.window_size = window_size
         self.stride = int(stride)
+        self.cow_tracking_down_ratio = int(cow_tracking_down_ratio)
         self.latent_dim = 128
         self.model_resolution = (384, 512)
         self.fusion_block = Fusionformer(
@@ -42,15 +48,43 @@ class TAPFormerCowDense(nn.Module):
         )
         self.dense_head = DenseWarpTrackingHead(
             feature_dim=self.latent_dim,
-            down_ratio=self.stride,
+            down_ratio=self.cow_tracking_down_ratio,
             refine_model=cow_refine_model,
             refine_patch_size=cow_refine_patch_size,
             refine_blocks=cow_refine_blocks,
             temporal_interleave_stride=cow_temporal_interleave_stride,
+            limit_flow=bool(cow_limit_flow),
+            max_flow_update_ratio=float(cow_max_flow_update_ratio),
+            max_flow_magnitude_ratio=float(cow_max_flow_magnitude_ratio),
+            refine_checkpoint=bool(cow_refine_checkpoint),
         )
+
+    def _validate_inputs(self, rgbs, events, queries, iters):
+        B, T, C_event, H, W = events.shape
+        _, N, _ = queries.shape
+        _, _, C_img, _, _ = rgbs.shape
+        if B != 1:
+            raise AssertionError("TAPFormerCowDense currently follows TAPFormer training and expects batch_size == 1")
+        if H % self.stride != 0 or W % self.stride != 0:
+            raise AssertionError("Input height/width must be divisible by model.stride")
+        if H % self.cow_tracking_down_ratio != 0 or W % self.cow_tracking_down_ratio != 0:
+            raise AssertionError("Input height/width must be divisible by model.cow_tracking_down_ratio")
+        if iters is None:
+            raise ValueError("TAPFormerCowDense.forward requires an explicit iters argument.")
+        return B, T, C_event, H, W, N, C_img
+
+    def _prepare_query_xy(self, queries: torch.Tensor) -> torch.Tensor:
+        queried_frames = queries[:, :, 0].long()
+        if torch.any(queried_frames != 0):
+            raise ValueError(
+                "TAPFormerCowDense expects all query frames to be 0. "
+                "Use a config with dataset.sample_vis_1st_frame: true."
+            )
+        return queries[..., 1:3]
 
     def _build_fmaps(self, fmaps_out, B: int, T: int, H: int, W: int, dtype: torch.dtype) -> torch.Tensor:
         H_stride, W_stride = H // self.stride, W // self.stride
+        H_track, W_track = H // self.cow_tracking_down_ratio, W // self.cow_tracking_down_ratio
         fmap = fmaps_out[0] if isinstance(fmaps_out, list) else fmaps_out
         fmap = fmap.permute(0, 2, 3, 1)
         fmap = fmap / torch.sqrt(
@@ -59,8 +93,70 @@ class TAPFormerCowDense(nn.Module):
                 torch.tensor(1e-12, device=fmap.device, dtype=fmap.dtype),
             )
         )
-        fmap = fmap.permute(0, 3, 1, 2).reshape(B, T, self.latent_dim, H_stride, W_stride)
+        fmap = fmap.permute(0, 3, 1, 2).reshape(B * T, self.latent_dim, H_stride, W_stride)
+        if (H_stride, W_stride) != (H_track, W_track):
+            fmap = F.interpolate(
+                fmap,
+                size=(H_track, W_track),
+                mode="bilinear",
+                align_corners=True,
+            )
+        fmap = fmap.reshape(B, T, self.latent_dim, H_track, W_track)
         return fmap.to(dtype)
+
+    def _encode_features(self, rgbs, events, img_ifnew=None):
+        B, T, C_event, H, W = events.shape
+        _, _, C_img, _, _ = rgbs.shape
+        rgbs_norm = 2 * (rgbs / 255.0) - 1.0
+        events_norm = 2 * events - 1.0
+        dtype = rgbs_norm.dtype
+        if img_ifnew is None:
+            img_ifnew = torch.ones(T, device=rgbs.device, dtype=rgbs.dtype)
+
+        fmaps_out = self.fusion_block(
+            rgbs_norm.reshape(-1, C_img, H, W),
+            events_norm.reshape(-1, C_event, H, W),
+            img_ifnew,
+        )
+        return self._build_fmaps(fmaps_out, B, T, H, W, dtype)
+
+    def _reset_fusion_state(self):
+        transunet = getattr(self.fusion_block, "transunet", None)
+        if transunet is None:
+            return
+        if hasattr(transunet, "xe_history"):
+            transunet.xe_history = []
+        if hasattr(transunet, "x_e_pre"):
+            transunet.x_e_pre = None
+        if hasattr(transunet, "x_out_"):
+            transunet.x_out_ = None
+
+    def _encode_window_features(self, rgbs, events, img_ifnew=None, reset_state=False):
+        if reset_state:
+            self._reset_fusion_state()
+        return self._encode_features(rgbs, events, img_ifnew=img_ifnew)
+
+    def _forward_window(
+        self,
+        features: torch.Tensor,
+        query_xy: torch.Tensor,
+        image_size: Tuple[int, int],
+        iters: int,
+    ):
+        dense_coords, dense_vis_logits, dense_conf_logits = self.dense_head(
+            features,
+            image_size=image_size,
+            iters=iters,
+        )
+
+        coord_preds: List[torch.Tensor] = [self._sample_dense(pred, query_xy) for pred in dense_coords]
+        vis_preds: List[torch.Tensor] = [self._sample_dense_scalar(pred, query_xy) for pred in dense_vis_logits]
+        conf_preds: List[torch.Tensor] = [self._sample_dense_scalar(pred, query_xy) for pred in dense_conf_logits]
+
+        coords_predicted = coord_preds[-1]
+        vis_predicted = torch.sigmoid(vis_preds[-1])
+        conf_predicted = torch.sigmoid(conf_preds[-1])
+        return coords_predicted, vis_predicted, conf_predicted, coord_preds, vis_preds, conf_preds
 
     def _sample_dense(self, dense: torch.Tensor, query_xy: torch.Tensor) -> torch.Tensor:
         # dense: [B,T,H,W,C], query_xy: [B,N,2] in original image coordinates.
@@ -82,49 +178,16 @@ class TAPFormerCowDense(nn.Module):
         return self._sample_dense(dense.unsqueeze(-1), query_xy)[..., 0]
 
     def forward(self, rgbs, events, queries, iters=None, img_ifnew=None, feat_init=None, is_train=False):
-        B, T, C_event, H, W = events.shape
-        _, N, _ = queries.shape
-        _, _, C_img, _, _ = rgbs.shape
-        if B != 1:
-            raise AssertionError("TAPFormerCowDense currently follows TAPFormer training and expects batch_size == 1")
-        if H % self.stride != 0 or W % self.stride != 0:
-            raise AssertionError("Input height/width must be divisible by model.stride")
-        if iters is None:
-            raise ValueError("TAPFormerCowDense.forward requires an explicit iters argument.")
-
+        _, T, _, H, W, _, _ = self._validate_inputs(rgbs, events, queries, iters)
         queried_frames = queries[:, :, 0].long()
-        if torch.any(queried_frames != 0):
-            raise ValueError(
-                "TAPFormerCowDense expects all query frames to be 0. "
-                "Use a config with dataset.sample_vis_1st_frame: true."
-            )
-        query_xy = queries[..., 1:3]
-
-        rgbs_norm = 2 * (rgbs / 255.0) - 1.0
-        events_norm = 2 * events - 1.0
-        dtype = rgbs_norm.dtype
-        if img_ifnew is None:
-            img_ifnew = torch.ones(T, device=rgbs.device, dtype=rgbs.dtype)
-
-        fmaps_out = self.fusion_block(
-            rgbs_norm.reshape(-1, C_img, H, W),
-            events_norm.reshape(-1, C_event, H, W),
-            img_ifnew,
-        )
-        features = self._build_fmaps(fmaps_out, B, T, H, W, dtype)
-        dense_coords, dense_vis_logits, dense_conf_logits = self.dense_head(
+        query_xy = self._prepare_query_xy(queries)
+        features = self._encode_features(rgbs, events, img_ifnew=img_ifnew)
+        coords_predicted, vis_predicted, conf_predicted, coord_preds, vis_preds, conf_preds = self._forward_window(
             features,
+            query_xy,
             image_size=(H, W),
-            iters=iters,
+            iters=int(iters),
         )
-
-        coord_preds: List[torch.Tensor] = [self._sample_dense(pred, query_xy) for pred in dense_coords]
-        vis_preds: List[torch.Tensor] = [self._sample_dense_scalar(pred, query_xy) for pred in dense_vis_logits]
-        conf_preds: List[torch.Tensor] = [self._sample_dense_scalar(pred, query_xy) for pred in dense_conf_logits]
-
-        coords_predicted = coord_preds[-1]
-        vis_predicted = torch.sigmoid(vis_preds[-1])
-        conf_predicted = torch.sigmoid(conf_preds[-1])
 
         if is_train:
             valid_mask = queried_frames[:, None] <= torch.arange(0, T, device=queries.device)[None, :, None]

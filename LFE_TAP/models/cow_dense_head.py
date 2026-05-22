@@ -3,6 +3,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from LFE_TAP.models.cow_refine import VideoRefineTransformer, MODEL_CONFIGS
 
@@ -36,12 +37,25 @@ class DenseWarpTrackingHead(nn.Module):
         refine_patch_size: int = 4,
         refine_blocks: Optional[int] = None,
         temporal_interleave_stride: int = 2,
+        limit_flow: bool = False,
+        max_flow_update_ratio: float = 0.15,
+        max_flow_magnitude_ratio: float = 1.0,
+        refine_checkpoint: bool = False,
     ):
         super().__init__()
         if refine_model not in MODEL_CONFIGS:
             raise ValueError(f"Unsupported cow refine model: {refine_model}")
         self.down_ratio = int(down_ratio)
         self.iter_dim = MODEL_CONFIGS[refine_model]["features"]
+        self.limit_flow = bool(limit_flow)
+        self.max_flow_update_ratio = float(max_flow_update_ratio)
+        self.max_flow_magnitude_ratio = float(max_flow_magnitude_ratio)
+        self.refine_checkpoint = bool(refine_checkpoint)
+        if self.limit_flow:
+            if self.max_flow_update_ratio <= 0.0:
+                raise ValueError("max_flow_update_ratio must be positive when limit_flow=True.")
+            if self.max_flow_magnitude_ratio <= 0.0:
+                raise ValueError("max_flow_magnitude_ratio must be positive when limit_flow=True.")
 
         self.fmap_conv = nn.Conv2d(feature_dim, self.iter_dim, 1)
         self.hidden_conv = nn.Conv2d(self.iter_dim * 2, self.iter_dim, 1)
@@ -101,6 +115,28 @@ class DenseWarpTrackingHead(nn.Module):
         grid = coords_grid(B * T, H_img, W_img, flow.device, flow.dtype).view(B, T, 2, H_img, W_img)
         return (grid + flow).permute(0, 1, 3, 4, 2)
 
+    def _flow_limits(self, flow: torch.Tensor) -> Tuple[float, float]:
+        longer_side = float(max(flow.shape[-2], flow.shape[-1]))
+        update_limit = longer_side * self.max_flow_update_ratio
+        total_limit = longer_side * self.max_flow_magnitude_ratio
+        return update_limit, total_limit
+
+    def _apply_flow_update(self, flow: torch.Tensor, raw_delta: torch.Tensor) -> torch.Tensor:
+        if not self.limit_flow:
+            return flow + raw_delta
+
+        update_limit, total_limit = self._flow_limits(flow)
+        delta = update_limit * torch.tanh(raw_delta / update_limit)
+        return (flow + delta).clamp(-total_limit, total_limit)
+
+    def _run_refine_net(self, refine_inp: torch.Tensor) -> torch.Tensor:
+        def refine_forward(x: torch.Tensor) -> torch.Tensor:
+            return self.refine_net(x)["out"]
+
+        if self.training and refine_inp.requires_grad and self.refine_checkpoint:
+            return checkpoint(refine_forward, refine_inp, use_reentrant=False)
+        return refine_forward(refine_inp)
+
     def forward(self, features: torch.Tensor, image_size: Tuple[int, int], iters: Optional[int] = None):
         B, T, _, H, W = features.shape
         if iters is None:
@@ -124,12 +160,12 @@ class DenseWarpTrackingHead(nn.Module):
             ).view(B, T, self.iter_dim, H, W)
             refine_inp = self.warp_linear(torch.cat([frame0, warped, net, flow], dim=2).reshape(B * T, -1, H, W))
             refine_inp = refine_inp.view(B, T, self.iter_dim, H, W)
-            refine_out = self.refine_net(refine_inp)["out"]
+            refine_out = self._run_refine_net(refine_inp)
             net = self.refine_transform(torch.cat([refine_out, net], dim=2).reshape(B * T, -1, H, W))
             net = net.view(B, T, self.iter_dim, H, W)
 
             update = self.flow_head(net.reshape(B * T, self.iter_dim, H, W)).view(B, T, 4, H, W)
-            flow = flow + update[:, :, :2]
+            flow = self._apply_flow_update(flow, update[:, :, :2])
             info = update[:, :, 2:]
             weight = 0.25 * self.upsample_weight(net.reshape(B * T, self.iter_dim, H, W)).view(B, T, -1, H, W)
             flow_up, info_up = self._upsample_predictions(flow, info, weight)
