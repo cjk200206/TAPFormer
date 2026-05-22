@@ -1,11 +1,15 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # Set this to the appropriate GPU ID(s) if needed
 import argparse
 import json
 import math
+from datetime import datetime
 from pathlib import Path
 
 import torch
 import yaml
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from LFE_TAP.datasets.kubric_movif_dataset import KubricMovifDataset_etap
 from LFE_TAP.models.tapformer import TAPFormer
@@ -106,6 +110,11 @@ def build_model_from_config(model_cfg):
             cow_refine_patch_size=int(model_cfg.get("cow_refine_patch_size", 4)),
             cow_refine_blocks=model_cfg.get("cow_refine_blocks", None),
             cow_temporal_interleave_stride=int(model_cfg.get("cow_temporal_interleave_stride", 2)),
+            cow_tracking_down_ratio=int(model_cfg.get("cow_tracking_down_ratio", 2)),
+            cow_limit_flow=bool(model_cfg.get("cow_limit_flow", True)),
+            cow_max_flow_update_ratio=float(model_cfg.get("cow_max_flow_update_ratio", 0.15)),
+            cow_max_flow_magnitude_ratio=float(model_cfg.get("cow_max_flow_magnitude_ratio", 1.0)),
+            cow_refine_checkpoint=bool(model_cfg.get("cow_refine_checkpoint", False)),
             **common_kwargs,
         )
     raise ValueError(
@@ -206,9 +215,17 @@ def main():
     if batch_size != 1:
         raise ValueError("TAPFormer forward currently asserts batch_size == 1. Please set train.batch_size: 1")
 
-    save_dir = Path(train_cfg.get("save_dir", "output/train_kubric"))
-    save_dir.mkdir(parents=True, exist_ok=True)
-    with open(save_dir / "train_args.json", "w", encoding="utf-8") as f:
+    save_root = Path(train_cfg.get("save_dir", "output/train_kubric"))
+    save_root.mkdir(parents=True, exist_ok=True)
+    run_dir = save_root / datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=False)
+    tensorboard_dir = run_dir / "tensorboard"
+    writer = SummaryWriter(log_dir=str(tensorboard_dir))
+    best_ckpt_path = run_dir / str(train_cfg.get("best_filename", "best.pth"))
+    print(f"run_dir={run_dir}", flush=True)
+    print(f"tensorboard_dir={tensorboard_dir}", flush=True)
+    print(f"best_ckpt_path={best_ckpt_path}", flush=True)
+    with open(run_dir / "train_args.json", "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
     dataset = KubricMovifDataset_etap(
@@ -221,6 +238,7 @@ def main():
         choose_long_point=bool(dataset_cfg.get("choose_long_point", False)),
         use_augs=bool(dataset_cfg.get("use_augs", False)),
         if_test=bool(dataset_cfg.get("if_test", False)),
+        resample_max_tries=int(dataset_cfg.get("resample_max_tries", 8)),
     )
 
     loader = DataLoader(
@@ -320,7 +338,7 @@ def main():
     save_best = bool(train_cfg.get("save_best", True))
     best_metric_name = str(train_cfg.get("best_metric", "loss"))
     best_mode = str(train_cfg.get("best_mode", "min")).lower().strip()
-    best_filename = str(train_cfg.get("best_filename", "best.pth"))
+    best_filename = best_ckpt_path.name
     best_sign = metric_sign(best_mode)
     best_metric = math.inf if best_mode == "min" else -math.inf
     best_epoch = -1
@@ -385,6 +403,16 @@ def main():
             global_step += 1
             for k in running:
                 running[k] += float(loss_dict[k].detach().item())
+            writer.add_scalar("train/loss", float(loss_dict["loss"].detach().item()), global_step)
+            writer.add_scalar("train/coord_loss", float(loss_dict["coord_loss"].detach().item()), global_step)
+            writer.add_scalar(
+                "train/invisible_coord_loss",
+                float(loss_dict["invisible_coord_loss"].detach().item()),
+                global_step,
+            )
+            writer.add_scalar("train/visibility_loss", float(loss_dict["visibility_loss"].detach().item()), global_step)
+            writer.add_scalar("train/confidence_loss", float(loss_dict["confidence_loss"].detach().item()), global_step)
+            writer.add_scalar("train/lr", get_current_lr(optimizer), global_step)
 
             if global_step % log_every == 0:
                 msg = (
@@ -411,10 +439,17 @@ def main():
             "best_mode": best_mode,
         }
         if save_every_epochs > 0 and ((epoch + 1) % save_every_epochs == 0):
-            torch.save(epoch_ckpt, save_dir / f"epoch_{epoch:03d}.pth")
+            torch.save(epoch_ckpt, run_dir / f"epoch_{epoch:03d}.pth")
+
+        writer.add_scalar("epoch/valid_steps", n_steps, epoch)
 
         if n_steps > 0:
             epoch_metrics = {k: (running[k] / n_steps) for k in running}
+            writer.add_scalar("epoch/loss", epoch_metrics["loss"], epoch)
+            writer.add_scalar("epoch/coord_loss", epoch_metrics["coord_loss"], epoch)
+            writer.add_scalar("epoch/invisible_coord_loss", epoch_metrics["invisible_coord_loss"], epoch)
+            writer.add_scalar("epoch/visibility_loss", epoch_metrics["visibility_loss"], epoch)
+            writer.add_scalar("epoch/confidence_loss", epoch_metrics["confidence_loss"], epoch)
             if best_metric_name not in epoch_metrics:
                 raise ValueError(
                     f"best_metric={best_metric_name} is not available. "
@@ -437,10 +472,10 @@ def main():
                     "best_metric_name": best_metric_name,
                     "best_mode": best_mode,
                 }
-                torch.save(best_ckpt, save_dir / best_filename)
+                torch.save(best_ckpt, run_dir / best_filename)
                 print(
                     f"[Best] epoch={epoch} {best_metric_name}={best_metric:.4f} "
-                    f"saved to {save_dir / best_filename}",
+                    f"saved to {run_dir / best_filename}",
                     flush=True,
                 )
             print(
@@ -466,7 +501,9 @@ def main():
             "best_metric_name": best_metric_name,
             "best_mode": best_mode,
         }
-        torch.save(final_ckpt, save_dir / "final.pth")
+        torch.save(final_ckpt, run_dir / "final.pth")
+
+    writer.close()
 
 
 if __name__ == "__main__":
