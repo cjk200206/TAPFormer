@@ -63,6 +63,9 @@ model:
   cow_max_flow_update_ratio: 0.15
   cow_max_flow_magnitude_ratio: 1.0
   cow_refine_checkpoint: true
+  cow_frontend_type: "frame_anchor"  # "base" | "frame_anchor"
+  cow_anchor_state_mix: 0.7
+  cow_anchor_skip_mix: 0.7
 
 loss:
   coord_weight: 0.05

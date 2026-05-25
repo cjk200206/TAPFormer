@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from LFE_TAP.models.cow_dense_head import DenseWarpTrackingHead
-from LFE_TAP.models.fusionFormer import Fusionformer
+from LFE_TAP.models.fusionFormer import Fusionformer, FusionformerFrameAnchor
 
 
 class TAPFormerCowDense(nn.Module):
@@ -31,6 +31,9 @@ class TAPFormerCowDense(nn.Module):
         cow_max_flow_update_ratio=0.15,
         cow_max_flow_magnitude_ratio=1.0,
         cow_refine_checkpoint=False,
+        cow_frontend_type="base",
+        cow_anchor_state_mix=0.7,
+        cow_anchor_skip_mix=0.7,
         **_,
     ):
         super().__init__()
@@ -39,13 +42,26 @@ class TAPFormerCowDense(nn.Module):
         self.cow_tracking_down_ratio = int(cow_tracking_down_ratio)
         self.latent_dim = 128
         self.model_resolution = (384, 512)
-        self.fusion_block = Fusionformer(
+        self.cow_frontend_type = str(cow_frontend_type).lower().strip()
+        if self.cow_frontend_type not in {"base", "frame_anchor"}:
+            raise ValueError(
+                f"Unsupported cow_frontend_type={cow_frontend_type}. Use one of: base, frame_anchor."
+            )
+        frontend_kwargs = dict(
             image_size=self.model_resolution,
             out_dim=self.latent_dim,
             mlp_dim=512,
             stride=self.stride,
             depth=2,
         )
+        if self.cow_frontend_type == "frame_anchor":
+            frontend_kwargs.update(
+                anchor_state_mix=float(cow_anchor_state_mix),
+                anchor_skip_mix=float(cow_anchor_skip_mix),
+            )
+            self.fusion_block = FusionformerFrameAnchor(**frontend_kwargs)
+        else:
+            self.fusion_block = Fusionformer(**frontend_kwargs)
         self.dense_head = DenseWarpTrackingHead(
             feature_dim=self.latent_dim,
             down_ratio=self.cow_tracking_down_ratio,
@@ -130,6 +146,12 @@ class TAPFormerCowDense(nn.Module):
             transunet.x_e_pre = None
         if hasattr(transunet, "x_out_"):
             transunet.x_out_ = None
+        if hasattr(transunet, "x_anchor_"):
+            transunet.x_anchor_ = None
+        if hasattr(transunet, "x1_anchor_"):
+            transunet.x1_anchor_ = None
+        if hasattr(transunet, "x0_anchor_"):
+            transunet.x0_anchor_ = None
 
     def _encode_window_features(self, rgbs, events, img_ifnew=None, reset_state=False):
         if reset_state:

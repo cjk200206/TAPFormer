@@ -115,6 +115,9 @@ def build_model_from_config(model_cfg):
             cow_max_flow_update_ratio=float(model_cfg.get("cow_max_flow_update_ratio", 0.15)),
             cow_max_flow_magnitude_ratio=float(model_cfg.get("cow_max_flow_magnitude_ratio", 1.0)),
             cow_refine_checkpoint=bool(model_cfg.get("cow_refine_checkpoint", False)),
+            cow_frontend_type=str(model_cfg.get("cow_frontend_type", "base")),
+            cow_anchor_state_mix=float(model_cfg.get("cow_anchor_state_mix", 0.7)),
+            cow_anchor_skip_mix=float(model_cfg.get("cow_anchor_skip_mix", 0.7)),
             **common_kwargs,
         )
     raise ValueError(
