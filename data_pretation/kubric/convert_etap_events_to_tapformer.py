@@ -9,9 +9,9 @@ Each .npz should contain event arrays with keys: x, y, t, p.
 
 Output (per sequence):
     <sequence_dir>/events.h5
-      - dataset: "events"
-      - shape: (N, 4), columns: [t_us, x, y, p]
-      - p is normalized to {0, 1}
+      - datasets: {"t", "x", "y", "p"}
+      - dtypes: {t:uint32, x:uint16, y:uint16, p:uint8}
+      - attrs: {format="split_v1", time_unit="us"}
 
 Optional:
     Trigger TAPFormer representation generation after conversion.
@@ -30,6 +30,12 @@ os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 import h5py
 import numpy as np
 from tqdm import tqdm
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+import sys
+sys.path.append(str(PROJECT_ROOT))
+
+from LFE_TAP.utils.event.utils import write_compact_events_h5
 
 
 def _extract_sequence_index(seq_name: str) -> Optional[int]:
@@ -157,9 +163,16 @@ def _merge_event_packets(npz_paths: Iterable[Path], time_unit: str) -> np.ndarra
 def _write_events_h5(events: np.ndarray, output_h5: Path, overwrite: bool) -> None:
     if output_h5.exists() and not overwrite:
         return
+    if events.ndim != 2 or events.shape[1] != 4:
+        raise ValueError(f"events array must have shape (N,4), got {events.shape}")
     output_h5.parent.mkdir(parents=True, exist_ok=True)
-    with h5py.File(output_h5, "w", locking=False) as h5f:
-        h5f.create_dataset("events", data=events, dtype=np.int64)
+    write_compact_events_h5(
+        output_h5=output_h5,
+        t=events[:, 0],
+        x=events[:, 1],
+        y=events[:, 2],
+        p=events[:, 3],
+    )
 
 
 def _convert_one_sequence(
