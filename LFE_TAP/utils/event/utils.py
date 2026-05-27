@@ -3,18 +3,47 @@ os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 from multiprocessing import Pool
 
 import h5py
-import hdf5plugin
+try:
+    import hdf5plugin  # noqa: F401
+except ImportError:
+    hdf5plugin = None
 import numpy as np
 import pandas as pd
 # import dv_processing as dv
 from pathlib import Path
-import cv2
-from cv2 import IMREAD_GRAYSCALE, imread
+try:
+    import cv2
+    from cv2 import IMREAD_GRAYSCALE, imread
+except ImportError:
+    cv2 = None
+    IMREAD_GRAYSCALE = None
+
+    def imread(*args, **kwargs):
+        raise ImportError("opencv-python is required for grayscale image reading")
 from omegaconf import OmegaConf, open_dict
 from tqdm import tqdm
 
 
+COMPACT_EVENTS_H5_FORMAT = "split_v1"
+COMPACT_EVENTS_H5_TIME_UNIT = "us"
+COMPACT_EVENTS_H5_DTYPES = {
+    "t": np.uint32,
+    "x": np.uint16,
+    "y": np.uint16,
+    "p": np.uint8,
+}
+
+
 def blosc_opts(complevel=1, complib="blosc:zstd", shuffle="byte"):
+    if hdf5plugin is None:
+        args = {
+            "compression": "gzip",
+            "compression_opts": max(1, min(int(complevel), 9)),
+        }
+        if shuffle in ("bit", "byte"):
+            args["shuffle"] = True
+        return args
+
     # Inspired by: https://github.com/h5py/h5py/issues/611#issuecomment-353694301
     # More info on options: https://github.com/Blosc/c-blosc/blob/7435f28dd08606bd51ab42b49b0e654547becac4/blosc/blosc.h#L55-L79
     shuffle = 2 if shuffle == "bit" else 1 if shuffle == "byte" else 0
@@ -28,6 +57,94 @@ def blosc_opts(complevel=1, complib="blosc:zstd", shuffle="byte"):
         # Do not use h5py shuffle if blosc shuffle is enabled.
         args["shuffle"] = False
     return args
+
+
+def is_compact_events_h5(h5f):
+    return all(name in h5f for name in ("t", "x", "y", "p"))
+
+
+def _load_events_h5_columns_from_open_file(h5f):
+    if is_compact_events_h5(h5f):
+        t = np.asarray(h5f["t"], dtype=np.int64)
+        x = np.asarray(h5f["x"], dtype=np.int64)
+        y = np.asarray(h5f["y"], dtype=np.int64)
+        p = np.asarray(h5f["p"], dtype=np.int64)
+        return t, x, y, p
+
+    if "events" not in h5f:
+        raise KeyError("events.h5 must contain either split datasets {t,x,y,p} or legacy dataset 'events'.")
+
+    events = np.asarray(h5f["events"])
+    if events.ndim != 2 or events.shape[1] != 4:
+        raise ValueError(f"legacy events dataset must have shape (N,4), got {events.shape}")
+    return (
+        np.asarray(events[:, 0], dtype=np.int64),
+        np.asarray(events[:, 1], dtype=np.int64),
+        np.asarray(events[:, 2], dtype=np.int64),
+        np.asarray(events[:, 3], dtype=np.int64),
+    )
+
+
+def load_events_h5_columns(path_or_h5):
+    if isinstance(path_or_h5, (str, Path)):
+        with h5py.File(str(path_or_h5), "r") as h5f:
+            return _load_events_h5_columns_from_open_file(h5f)
+    return _load_events_h5_columns_from_open_file(path_or_h5)
+
+
+def _validate_compact_events_columns(t, x, y, p):
+    arrays = {
+        "t": np.asarray(t),
+        "x": np.asarray(x),
+        "y": np.asarray(y),
+        "p": np.asarray(p),
+    }
+    lengths = {name: arr.shape[0] for name, arr in arrays.items()}
+    if any(arr.ndim != 1 for arr in arrays.values()):
+        raise ValueError("events columns must all be 1D arrays")
+    if len(set(lengths.values())) != 1:
+        raise ValueError(f"events columns must have equal length, got lengths={lengths}")
+
+    if arrays["t"].size == 0:
+        return (
+            arrays["t"].astype(np.uint32, copy=False),
+            arrays["x"].astype(np.uint16, copy=False),
+            arrays["y"].astype(np.uint16, copy=False),
+            arrays["p"].astype(np.uint8, copy=False),
+        )
+
+    t_i64 = np.asarray(arrays["t"], dtype=np.int64)
+    x_i64 = np.asarray(arrays["x"], dtype=np.int64)
+    y_i64 = np.asarray(arrays["y"], dtype=np.int64)
+    p_i64 = np.asarray(arrays["p"], dtype=np.int64)
+
+    if np.min(t_i64) < 0 or np.max(t_i64) > np.iinfo(np.uint32).max:
+        raise ValueError("event timestamp range is outside uint32")
+    if np.min(x_i64) < 0 or np.max(x_i64) > np.iinfo(np.uint16).max:
+        raise ValueError("event x range is outside uint16")
+    if np.min(y_i64) < 0 or np.max(y_i64) > np.iinfo(np.uint16).max:
+        raise ValueError("event y range is outside uint16")
+    if not np.all((p_i64 == 0) | (p_i64 == 1)):
+        raise ValueError("event polarity must be 0 or 1")
+
+    return (
+        t_i64.astype(np.uint32, copy=False),
+        x_i64.astype(np.uint16, copy=False),
+        y_i64.astype(np.uint16, copy=False),
+        p_i64.astype(np.uint8, copy=False),
+    )
+
+
+def write_compact_events_h5(output_h5, t, x, y, p):
+    t_u32, x_u16, y_u16, p_u8 = _validate_compact_events_columns(t, x, y, p)
+
+    with h5py.File(str(output_h5), "w") as h5f:
+        h5f.attrs["format"] = COMPACT_EVENTS_H5_FORMAT
+        h5f.attrs["time_unit"] = COMPACT_EVENTS_H5_TIME_UNIT
+        h5f.create_dataset("t", data=t_u32, dtype=np.uint32, **blosc_opts(complevel=1, shuffle="byte"))
+        h5f.create_dataset("x", data=x_u16, dtype=np.uint16, **blosc_opts(complevel=1, shuffle="byte"))
+        h5f.create_dataset("y", data=y_u16, dtype=np.uint16, **blosc_opts(complevel=1, shuffle="byte"))
+        h5f.create_dataset("p", data=p_u8, dtype=np.uint8, **blosc_opts(complevel=1, shuffle="byte"))
 
 
 def query_events(events_h5, events_t, t0, t1):
@@ -77,31 +194,31 @@ def read_input(input_path, representation):
     assert os.path.exists(input_path), f"Path to input file {input_path} doesn't exist."
     
     if "time_surfaces_accumulate" in representation:
-        return h5py.File(input_path, "r", locking=False)["time_surface_accumulate"]
+        return h5py.File(input_path, "r")["time_surface_accumulate"]
     
     elif "event_stack_v1_5" in representation:
-        return h5py.File(input_path, "r", locking=False)["time_surface"]
+        return h5py.File(input_path, "r")["time_surface"]
     
     elif "count_images" in representation:
-        return h5py.File(input_path, "r", locking=False)["count_images"]
+        return h5py.File(input_path, "r")["count_images"]
     
     elif "time_surface" in representation:
-        return h5py.File(input_path, "r", locking=False)["time_surface"]
+        return h5py.File(input_path, "r")["time_surface"]
 
     elif "voxel" in representation:
-        return h5py.File(input_path, "r", locking=False)["voxel_grid"]
+        return h5py.File(input_path, "r")["voxel_grid"]
 
     elif "event_stack" in representation:
-        return h5py.File(input_path, "r", locking=False)["event_stack"]
+        return h5py.File(input_path, "r")["event_stack"]
     
     elif "time_order_surface" in representation:
-        return h5py.File(input_path, "r", locking=False)["time_order_surface"]
+        return h5py.File(input_path, "r")["time_order_surface"]
     
     elif "time_surface" in representation:
-        return h5py.File(input_path, "r", locking=False)["time_surface"]
+        return h5py.File(input_path, "r")["time_surface"]
     
     elif "sobel" in representation:
-        return h5py.File(input_path, "r", locking=False)["sobel"]
+        return h5py.File(input_path, "r")["sobel"]
 
     elif "grayscale" in representation:
         return imread(input_path, IMREAD_GRAYSCALE).astype(np.float32) / 255.0
