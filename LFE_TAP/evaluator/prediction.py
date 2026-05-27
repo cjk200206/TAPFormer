@@ -334,6 +334,9 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         cow_max_flow_update_ratio=0.15,
         cow_max_flow_magnitude_ratio=1.0,
         cow_refine_checkpoint=False,
+        cow_frontend_type="base",
+        cow_anchor_state_mix=0.7,
+        cow_anchor_skip_mix=0.7,
     ):
         if trained_model is not None:
             super().__init__(
@@ -355,9 +358,13 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 cow_max_flow_update_ratio=cow_max_flow_update_ratio,
                 cow_max_flow_magnitude_ratio=cow_max_flow_magnitude_ratio,
                 cow_refine_checkpoint=cow_refine_checkpoint,
+                cow_frontend_type=getattr(trained_model, "cow_frontend_type", cow_frontend_type),
+                cow_anchor_state_mix=cow_anchor_state_mix,
+                cow_anchor_skip_mix=cow_anchor_skip_mix,
             )
             self.fusion_block = trained_model.fusion_block
             self.dense_head = trained_model.dense_head
+            self.cow_frontend_type = getattr(trained_model, "cow_frontend_type", self.cow_frontend_type)
         else:
             super().__init__(
                 window_size=window_size,
@@ -378,6 +385,9 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 cow_max_flow_update_ratio=cow_max_flow_update_ratio,
                 cow_max_flow_magnitude_ratio=cow_max_flow_magnitude_ratio,
                 cow_refine_checkpoint=cow_refine_checkpoint,
+                cow_frontend_type=cow_frontend_type,
+                cow_anchor_state_mix=cow_anchor_state_mix,
+                cow_anchor_skip_mix=cow_anchor_skip_mix,
             )
 
     @torch.no_grad()

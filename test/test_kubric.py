@@ -7,7 +7,7 @@ Usage:
 
 import argparse
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import sys
 from pathlib import Path
 
