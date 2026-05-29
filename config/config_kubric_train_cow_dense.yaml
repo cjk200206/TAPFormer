@@ -1,7 +1,7 @@
 # Configuration file for Kubric/ETAP training with TAPFormer fusion + CoW-style dense head
 
 dataset:
-  data_root: "data/event_kubric/test"
+  data_root: "data/event_kubric/train"
   representation: "time_surfaces_v2_5"
   seq_len: 12
   traj_per_sample: 384
@@ -9,13 +9,13 @@ dataset:
   height: 384
   width: 512
   sample_vis_1st_frame: true
-  choose_long_point: true
+  choose_long_point: false
   use_augs: false
   if_test: false
 
 train:
-  save_dir: "output/train_kubric_cow_dense_v1"
-  epochs: 200
+  save_dir: "output/train_kubric_cow_dense"
+  epochs: 20
   batch_size: 1
   num_workers: 8
   shuffle: true
@@ -63,13 +63,14 @@ model:
   cow_max_flow_update_ratio: 0.15
   cow_max_flow_magnitude_ratio: 1.0
   cow_refine_checkpoint: true
-  cow_frontend_type: "frame_anchor"  # "base" | "frame_anchor"
+  cow_info_update_mode: "iterative"  # direct | iterative
+  cow_frontend_type: "base"  # "base" | "frame_anchor"
   cow_anchor_state_mix: 0.7
   cow_anchor_skip_mix: 0.7
 
 loss:
   coord_weight: 0.05
-  invisible_coord_weight: 0.01
+  invisible_coord_weight: 0.01 #0.01
   visibility_weight: 1.0
   confidence_weight: 1.0
   iter_gamma: 0.8

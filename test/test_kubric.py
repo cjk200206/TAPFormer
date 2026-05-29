@@ -11,6 +11,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import sys
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
 import yaml
 
@@ -23,6 +25,7 @@ from LFE_TAP.evaluator.evaluation_pred import EvaluationPredictor
 from LFE_TAP.evaluator.prediction import TAPFormerCowDense_online, TAPFormer_online
 from LFE_TAP.models.tapformer import TAPFormer
 from LFE_TAP.models.tapformer_cow_dense import TAPFormerCowDense
+from LFE_TAP.utils.model_utils import get_points_on_a_grid
 from LFE_TAP.utils.visualizer import Visualizer
 
 DEFAULT_DEVICE = (
@@ -80,10 +83,99 @@ def build_query_from_clip_start(traj, visibility, valid=None):
     return queries, traj, visibility, valid
 
 
+def build_query_from_grid(image_shape, grid_size, device, dtype):
+    grid_xy = get_points_on_a_grid(grid_size, image_shape, device=device).to(dtype=dtype)
+    query_t = torch.zeros_like(grid_xy[:, :, :1])
+    return torch.cat([query_t, grid_xy], dim=2)
+
+
+def build_visualization_queries(traj, visibility, valid, image_shape, is_cow_dense, query_mode, grid_size):
+    if query_mode == "gt":
+        if is_cow_dense:
+            return build_query_from_clip_start(traj, visibility, valid=valid)
+        return build_query_from_first_visible(traj, visibility, valid=valid), traj, visibility, valid
+    if query_mode == "grid":
+        queries = build_query_from_grid(image_shape, grid_size, traj.device, traj.dtype)
+        return queries, traj, visibility, valid
+    raise ValueError(f"Unsupported visualization.query_mode={query_mode}. Use gt or grid.")
+
+
 def slice_sequence(tensor, start, end):
     if tensor is None:
         return None
     return tensor[start:end]
+
+
+def compress_events_for_visualization(events: torch.Tensor) -> torch.Tensor:
+    if events.shape[2] == 10:
+        events_vis = events.clone()
+        events_vis[:, :, 1::2] = -events_vis[:, :, 1::2]
+        max_abs_indices = torch.abs(events_vis).argmax(dim=2, keepdim=True)
+        compressed = (torch.gather(events_vis, dim=2, index=max_abs_indices) + 1) / 2 * 255.0
+        return compressed.repeat(1, 1, 3, 1, 1)
+
+    mean_events = events.mean(dim=2, keepdim=True)
+    mean_events = mean_events - mean_events.amin(dim=(3, 4), keepdim=True)
+    denom = mean_events.amax(dim=(3, 4), keepdim=True).clamp_min(1e-6)
+    mean_events = mean_events / denom * 255.0
+    return mean_events.repeat(1, 1, 3, 1, 1)
+
+
+def flow_to_rgb_video(flow: torch.Tensor) -> torch.Tensor:
+    flow_np = flow.detach().cpu().numpy()
+    magnitude = np.linalg.norm(flow_np, axis=-1)
+    scale = float(np.percentile(magnitude, 95))
+    if scale <= 1e-6:
+        scale = 1.0
+
+    frames = []
+    for frame_flow in flow_np:
+        dx = frame_flow[..., 0]
+        dy = frame_flow[..., 1]
+        frame_mag = np.sqrt(dx * dx + dy * dy)
+        angle = np.arctan2(dy, dx)
+        hsv = np.zeros((*dx.shape, 3), dtype=np.uint8)
+        hsv[..., 0] = np.mod((angle + np.pi) * 90.0 / np.pi, 180).astype(np.uint8)
+        hsv[..., 1] = (np.clip(frame_mag / scale, 0.0, 1.0) * 255.0).astype(np.uint8)
+        hsv[..., 2] = hsv[..., 1]
+        frames.append(cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB))
+
+    return torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2)[None].byte()
+
+
+def scalar_map_to_rgb_video(values: torch.Tensor) -> torch.Tensor:
+    values = values.detach().cpu().clamp(0.0, 1.0)
+    values = (values * 255.0).to(torch.uint8)
+    return values.unsqueeze(2).repeat(1, 1, 3, 1, 1)
+
+
+def blend_videos(base_video: torch.Tensor, overlay_video: torch.Tensor, alpha: float) -> torch.Tensor:
+    blended = (1.0 - alpha) * base_video.float() + alpha * overlay_video.float()
+    return blended.clamp(0, 255).to(torch.uint8)
+
+
+def export_dense_debug_videos(visualizer, seq_name, events, dense_debug, alpha):
+    dense_tracks = dense_debug["dense_tracks"]
+    _, _, H, W, _ = dense_tracks.shape
+    device = dense_tracks.device
+    y, x = torch.meshgrid(
+        torch.arange(H, device=device, dtype=dense_tracks.dtype),
+        torch.arange(W, device=device, dtype=dense_tracks.dtype),
+        indexing="ij",
+    )
+    base_grid = torch.stack([x, y], dim=-1).unsqueeze(0).unsqueeze(0)
+    dense_flow = dense_tracks - base_grid
+
+    flow_video = flow_to_rgb_video(dense_flow[0])
+    vis_video = scalar_map_to_rgb_video(dense_debug["dense_vis"])
+    conf_video = scalar_map_to_rgb_video(dense_debug["dense_conf"])
+    event_video = compress_events_for_visualization(events.detach().cpu())
+    flow_event_video = blend_videos(event_video, flow_video, alpha)
+
+    visualizer.save_video(flow_video, f"{seq_name}_dense_flow")
+    visualizer.save_video(vis_video, f"{seq_name}_dense_vis")
+    visualizer.save_video(conf_video, f"{seq_name}_dense_conf")
+    visualizer.save_video(flow_event_video, f"{seq_name}_dense_flow_event")
 
 
 def build_model_from_config(model_cfg, inference_mode="online"):
@@ -201,13 +293,29 @@ def main():
     visibility_threshold = float(vis_cfg.get("visibility_threshold", 0.8))
     use_clear_video = bool(vis_cfg.get("use_clear_video", True))
     use_gt_as_prediction = bool(vis_cfg.get("use_gt_as_prediction", True))
+    query_mode = str(vis_cfg.get("query_mode", "gt")).lower().strip()
+    query_grid_size = int(vis_cfg.get("grid_size", 5))
+    dense_debug = bool(vis_cfg.get("dense_debug", False))
+    dense_overlay_alpha = float(vis_cfg.get("dense_overlay_alpha", 0.5))
     video_start = max(0, int(vis_cfg.get("video_start", 0)))
     video_length = int(vis_cfg.get("video_length", 0))
     is_cow_dense = str(model_cfg.get("name", "")).lower().strip() in {"tapformer_cow_dense", "cow_dense"}
+    if query_mode not in {"gt", "grid"}:
+        raise ValueError(f"Unsupported visualization.query_mode={query_mode}. Use gt or grid.")
+    if query_mode == "grid" and query_grid_size <= 0:
+        raise ValueError("visualization.grid_size must be positive when visualization.query_mode=grid.")
+    if query_mode == "grid" and use_gt_as_prediction:
+        print("visualization.query_mode=grid does not support use_gt_as_prediction=true; falling back to model prediction.")
+        use_gt_as_prediction = False
+    if dense_debug and (not is_cow_dense or inference_mode != "offline"):
+        raise ValueError("visualization.dense_debug only supports cow_dense with predictor.inference_mode=offline.")
+    if not 0.0 <= dense_overlay_alpha <= 1.0:
+        raise ValueError("visualization.dense_overlay_alpha must be in [0, 1].")
 
     print(f"Using device: {DEFAULT_DEVICE}")
     print(f"Inference mode: {inference_mode}")
     print(f"Input mode: {predictor.input_mode}")
+    print(f"Query mode: {query_mode}" + (f" (grid_size={query_grid_size})" if query_mode == "grid" else ""))
     print(f"Clip setting: start={video_start}, length={video_length}")
     print(f"Selected {len(seq_indices)} sequences for visualization")
 
@@ -237,14 +345,19 @@ def main():
         valid = slice_sequence(valid, video_start, clip_end)
         img_ifnew = slice_sequence(img_ifnew, video_start, clip_end)
 
-        if is_cow_dense:
-            query_data = build_query_from_clip_start(traj, visibility, valid=valid)
-            if query_data is None:
-                print(f"Skip {seq_name}: no point visible at clip start for cow-dense")
-                continue
-            queries, traj, visibility, valid = query_data
-        else:
-            queries = build_query_from_first_visible(traj, visibility, valid=valid)
+        query_data = build_visualization_queries(
+            traj,
+            visibility,
+            valid,
+            video.shape[-2:],
+            is_cow_dense,
+            query_mode,
+            query_grid_size,
+        )
+        if query_data is None:
+            print(f"Skip {seq_name}: no point visible at clip start for cow-dense")
+            continue
+        queries, traj, visibility, valid = query_data
 
         video_b = video.unsqueeze(0).to(DEFAULT_DEVICE)
         events_b = events.unsqueeze(0).to(DEFAULT_DEVICE)
@@ -263,6 +376,22 @@ def main():
         print(
             f"[{seq_name}] clip_len={video.shape[0]} traj={tuple(pred_traj.shape)} vis={tuple(pred_vis.shape)} conf={tuple(pred_conf.shape)}"
         )
+
+        if dense_debug:
+            with torch.no_grad():
+                dense_debug_data = model.forward_dense_debug(
+                    rgbs=video_b,
+                    events=events_b,
+                    iters=int(pred_cfg.get("n_iters", 6)),
+                    img_ifnew=img_ifnew,
+                )
+            export_dense_debug_videos(
+                visualizer,
+                seq_name,
+                events_b,
+                dense_debug_data,
+                dense_overlay_alpha,
+            )
 
         vis_mask = pred_vis.bool() if use_gt_as_prediction else (pred_vis > visibility_threshold)
 

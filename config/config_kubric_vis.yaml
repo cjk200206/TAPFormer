@@ -49,7 +49,9 @@ visualization:
   enable: true
   video_model: "events"   # events | rgb
   use_clear_video: true
-  use_gt_as_prediction: false  # true: visualize GT directly, false: visualize model prediction
+  use_gt_as_prediction: false
+  query_mode: "gt"  # gt | grid
+  grid_size: 32
   visibility_threshold: 0.8
   fps: 20
   linewidth: 2

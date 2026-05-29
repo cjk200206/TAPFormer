@@ -1,6 +1,6 @@
 # Configuration file for Kubric/ETAP visualization with TAPFormer fusion + CoW-style dense head
 
-ckpt_root: "output/train_kubric_cow_dense_v1/20260525_021131/best.pth"
+ckpt_root: "output/train_kubric_cow_dense/20260527_221751/best.pth"
 
 dataset:
   data_root: "data/event_kubric/test"
@@ -33,12 +33,13 @@ model:
   cow_max_flow_update_ratio: 0.15
   cow_max_flow_magnitude_ratio: 1.0
   cow_refine_checkpoint: true
-  cow_frontend_type: "frame_anchor"  # "base" | "frame_anchor"
+  cow_info_update_mode: "direct"  # direct | iterative
+  cow_frontend_type: "base"  # "base" | "frame_anchor"
   cow_anchor_state_mix: 0.7
   cow_anchor_skip_mix: 0.7
 
 predictor:
-  inference_mode: "online"  # online | offline
+  inference_mode: "offline"  # online | offline
   input_mode: "fusion"  # fusion | frame | event
   n_iters: 5
   grid_size: 0
@@ -60,10 +61,14 @@ visualization:
   video_model: "events"
   use_clear_video: true
   use_gt_as_prediction: false
+  query_mode: "grid"  # gt | grid
+  grid_size: 32
   visibility_threshold: 0.8
   fps: 20
   linewidth: 2
   mode: "rainbow"
   tracks_leave_trace: 12
+  dense_debug: true
+  dense_overlay_alpha: 0.5
   video_start: 0
-  video_length: 0
+  video_length: 24
