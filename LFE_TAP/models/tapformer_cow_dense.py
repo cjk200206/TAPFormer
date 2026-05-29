@@ -31,6 +31,7 @@ class TAPFormerCowDense(nn.Module):
         cow_max_flow_update_ratio=0.15,
         cow_max_flow_magnitude_ratio=1.0,
         cow_refine_checkpoint=False,
+        cow_info_update_mode="direct",
         cow_frontend_type="base",
         cow_anchor_state_mix=0.7,
         cow_anchor_skip_mix=0.7,
@@ -73,6 +74,7 @@ class TAPFormerCowDense(nn.Module):
             max_flow_update_ratio=float(cow_max_flow_update_ratio),
             max_flow_magnitude_ratio=float(cow_max_flow_magnitude_ratio),
             refine_checkpoint=bool(cow_refine_checkpoint),
+            info_update_mode=cow_info_update_mode,
         )
 
     def _validate_inputs(self, rgbs, events, queries, iters):
@@ -164,12 +166,19 @@ class TAPFormerCowDense(nn.Module):
         query_xy: torch.Tensor,
         image_size: Tuple[int, int],
         iters: int,
+        return_debug: bool = False,
     ):
-        dense_coords, dense_vis_logits, dense_conf_logits = self.dense_head(
+        dense_debug = None
+        dense_outputs = self.dense_head(
             features,
             image_size=image_size,
             iters=iters,
+            return_debug=return_debug,
         )
+        if return_debug:
+            dense_coords, dense_vis_logits, dense_conf_logits, dense_debug = dense_outputs
+        else:
+            dense_coords, dense_vis_logits, dense_conf_logits = dense_outputs
 
         coord_preds: List[torch.Tensor] = [self._sample_dense(pred, query_xy) for pred in dense_coords]
         vis_preds: List[torch.Tensor] = [self._sample_dense_scalar(pred, query_xy) for pred in dense_vis_logits]
@@ -178,7 +187,7 @@ class TAPFormerCowDense(nn.Module):
         coords_predicted = coord_preds[-1]
         vis_predicted = torch.sigmoid(vis_preds[-1])
         conf_predicted = torch.sigmoid(conf_preds[-1])
-        return coords_predicted, vis_predicted, conf_predicted, coord_preds, vis_preds, conf_preds
+        return coords_predicted, vis_predicted, conf_predicted, coord_preds, vis_preds, conf_preds, dense_debug
 
     def _sample_dense(self, dense: torch.Tensor, query_xy: torch.Tensor) -> torch.Tensor:
         # dense: [B,T,H,W,C], query_xy: [B,N,2] in original image coordinates.
@@ -199,12 +208,33 @@ class TAPFormerCowDense(nn.Module):
     def _sample_dense_scalar(self, dense: torch.Tensor, query_xy: torch.Tensor) -> torch.Tensor:
         return self._sample_dense(dense.unsqueeze(-1), query_xy)[..., 0]
 
+    @torch.no_grad()
+    def forward_dense_debug(self, rgbs, events, iters=None, img_ifnew=None):
+        B, T, _, H, W = events.shape
+        if B != 1:
+            raise AssertionError("TAPFormerCowDense.forward_dense_debug expects batch_size == 1")
+        if H % self.stride != 0 or W % self.stride != 0:
+            raise AssertionError("Input height/width must be divisible by model.stride")
+        if H % self.cow_tracking_down_ratio != 0 or W % self.cow_tracking_down_ratio != 0:
+            raise AssertionError("Input height/width must be divisible by model.cow_tracking_down_ratio")
+        if iters is None:
+            raise ValueError("TAPFormerCowDense.forward_dense_debug requires an explicit iters argument.")
+        features = self._encode_features(rgbs, events, img_ifnew=img_ifnew)
+        dense_outputs = self.dense_head(
+            features,
+            image_size=(H, W),
+            iters=int(iters),
+            return_debug=True,
+        )
+        _, _, _, dense_debug = dense_outputs
+        return dense_debug
+
     def forward(self, rgbs, events, queries, iters=None, img_ifnew=None, feat_init=None, is_train=False):
         _, T, _, H, W, _, _ = self._validate_inputs(rgbs, events, queries, iters)
         queried_frames = queries[:, :, 0].long()
         query_xy = self._prepare_query_xy(queries)
         features = self._encode_features(rgbs, events, img_ifnew=img_ifnew)
-        coords_predicted, vis_predicted, conf_predicted, coord_preds, vis_preds, conf_preds = self._forward_window(
+        coords_predicted, vis_predicted, conf_predicted, coord_preds, vis_preds, conf_preds, _ = self._forward_window(
             features,
             query_xy,
             image_size=(H, W),

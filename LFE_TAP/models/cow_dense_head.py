@@ -41,6 +41,7 @@ class DenseWarpTrackingHead(nn.Module):
         max_flow_update_ratio: float = 0.15,
         max_flow_magnitude_ratio: float = 1.0,
         refine_checkpoint: bool = False,
+        info_update_mode: str = "direct",
     ):
         super().__init__()
         if refine_model not in MODEL_CONFIGS:
@@ -51,6 +52,11 @@ class DenseWarpTrackingHead(nn.Module):
         self.max_flow_update_ratio = float(max_flow_update_ratio)
         self.max_flow_magnitude_ratio = float(max_flow_magnitude_ratio)
         self.refine_checkpoint = bool(refine_checkpoint)
+        self.info_update_mode = str(info_update_mode).lower().strip()
+        if self.info_update_mode not in {"direct", "iterative"}:
+            raise ValueError(
+                f"Unsupported info_update_mode={info_update_mode}. Use one of: direct, iterative."
+            )
         if self.limit_flow:
             if self.max_flow_update_ratio <= 0.0:
                 raise ValueError("max_flow_update_ratio must be positive when limit_flow=True.")
@@ -129,6 +135,11 @@ class DenseWarpTrackingHead(nn.Module):
         delta = update_limit * torch.tanh(raw_delta / update_limit)
         return (flow + delta).clamp(-total_limit, total_limit)
 
+    def _apply_info_update(self, info: torch.Tensor, raw_info: torch.Tensor) -> torch.Tensor:
+        if self.info_update_mode == "iterative":
+            return info + raw_info
+        return raw_info
+
     def _run_refine_net(self, refine_inp: torch.Tensor) -> torch.Tensor:
         def refine_forward(x: torch.Tensor) -> torch.Tensor:
             return self.refine_net(x)["out"]
@@ -137,7 +148,13 @@ class DenseWarpTrackingHead(nn.Module):
             return checkpoint(refine_forward, refine_inp, use_reentrant=False)
         return refine_forward(refine_inp)
 
-    def forward(self, features: torch.Tensor, image_size: Tuple[int, int], iters: Optional[int] = None):
+    def forward(
+        self,
+        features: torch.Tensor,
+        image_size: Tuple[int, int],
+        iters: Optional[int] = None,
+        return_debug: bool = False,
+    ):
         B, T, _, H, W = features.shape
         if iters is None:
             raise ValueError("DenseWarpTrackingHead.forward requires an explicit iters argument.")
@@ -148,8 +165,10 @@ class DenseWarpTrackingHead(nn.Module):
         net = self.hidden_conv(torch.cat([frame0, fmap], dim=2).reshape(B * T, -1, H, W))
         net = net.view(B, T, self.iter_dim, H, W)
         flow = torch.zeros(B, T, 2, H, W, device=features.device, dtype=features.dtype)
+        info = torch.zeros(B, T, 2, H, W, device=features.device, dtype=features.dtype)
 
         track_preds, vis_preds, conf_preds = [], [], []
+        dense_debug = None
         base_coords = coords_grid(B * T, H, W, features.device, features.dtype)
         for _ in range(n_iters):
             flow = flow.detach()
@@ -166,11 +185,22 @@ class DenseWarpTrackingHead(nn.Module):
 
             update = self.flow_head(net.reshape(B * T, self.iter_dim, H, W)).view(B, T, 4, H, W)
             flow = self._apply_flow_update(flow, update[:, :, :2])
-            info = update[:, :, 2:]
+            info = self._apply_info_update(info, update[:, :, 2:])
             weight = 0.25 * self.upsample_weight(net.reshape(B * T, self.iter_dim, H, W)).view(B, T, -1, H, W)
             flow_up, info_up = self._upsample_predictions(flow, info, weight)
-            track_preds.append(self._flow_to_tracks(flow_up, image_size))
-            vis_preds.append(info_up[:, :, 0])
-            conf_preds.append(info_up[:, :, 1])
+            dense_tracks = self._flow_to_tracks(flow_up, image_size)
+            dense_vis = info_up[:, :, 0]
+            dense_conf = info_up[:, :, 1]
+            track_preds.append(dense_tracks)
+            vis_preds.append(dense_vis)
+            conf_preds.append(dense_conf)
+            if return_debug:
+                dense_debug = {
+                    "dense_tracks": dense_tracks,
+                    "dense_vis": torch.sigmoid(dense_vis),
+                    "dense_conf": torch.sigmoid(dense_conf),
+                }
 
+        if return_debug:
+            return track_preds, vis_preds, conf_preds, dense_debug
         return track_preds, vis_preds, conf_preds
