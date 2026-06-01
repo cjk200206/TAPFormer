@@ -121,6 +121,64 @@ class DenseWarpTrackingHead(nn.Module):
         grid = coords_grid(B * T, H_img, W_img, flow.device, flow.dtype).view(B, T, 2, H_img, W_img)
         return (grid + flow).permute(0, 1, 3, 4, 2)
 
+    def _init_flow(
+        self,
+        init_track: Optional[torch.Tensor],
+        B: int,
+        T: int,
+        H: int,
+        W: int,
+        H_img: int,
+        W_img: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if init_track is None:
+            return torch.zeros(B, T, 2, H, W, device=device, dtype=dtype)
+
+        coords = coords_grid(B * T, H_img, W_img, device, dtype).view(B, T, 2, H_img, W_img)
+        init_track = init_track.to(device=device, dtype=dtype).permute(0, 1, 4, 2, 3)
+        disp = init_track - coords
+        disp = (disp / float(self.down_ratio)).view(B * T, 2, H_img, W_img)
+        disp = F.interpolate(disp, size=(H, W), mode="bilinear", align_corners=True)
+        return disp.view(B, T, 2, H, W)
+
+    def _init_info(
+        self,
+        init_vis: Optional[torch.Tensor],
+        init_conf: Optional[torch.Tensor],
+        B: int,
+        T: int,
+        H: int,
+        W: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        info = torch.zeros(B * T, 2, H, W, device=device, dtype=dtype)
+        for idx, init_prob in enumerate((init_vis, init_conf)):
+            if init_prob is None:
+                continue
+            prob = init_prob.to(device=device, dtype=dtype).clamp(1e-4, 1.0 - 1e-4)
+            prob = prob.view(B * T, 1, prob.shape[-2], prob.shape[-1])
+            prob = F.interpolate(prob, size=(H, W), mode="bilinear", align_corners=True)
+            info[:, idx : idx + 1] = torch.logit(prob)
+        return info.view(B, T, 2, H, W)
+
+    def _format_predictions(
+        self,
+        flow: torch.Tensor,
+        info: torch.Tensor,
+        net: torch.Tensor,
+        image_size: Tuple[int, int],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        B, T = flow.shape[:2]
+        weight = 0.25 * self.upsample_weight(net.reshape(B * T, self.iter_dim, flow.shape[-2], flow.shape[-1])).view(
+            B, T, -1, flow.shape[-2], flow.shape[-1]
+        )
+        flow_up, info_up = self._upsample_predictions(flow, info, weight)
+        dense_tracks = self._flow_to_tracks(flow_up, image_size)
+        return dense_tracks, info_up[:, :, 0], info_up[:, :, 1]
+
     def _flow_limits(self, flow: torch.Tensor) -> Tuple[float, float]:
         longer_side = float(max(flow.shape[-2], flow.shape[-1]))
         update_limit = longer_side * self.max_flow_update_ratio
@@ -153,6 +211,9 @@ class DenseWarpTrackingHead(nn.Module):
         features: torch.Tensor,
         image_size: Tuple[int, int],
         iters: Optional[int] = None,
+        init_track: Optional[torch.Tensor] = None,
+        init_vis: Optional[torch.Tensor] = None,
+        init_conf: Optional[torch.Tensor] = None,
         return_debug: bool = False,
     ):
         B, T, _, H, W = features.shape
@@ -160,12 +221,13 @@ class DenseWarpTrackingHead(nn.Module):
             raise ValueError("DenseWarpTrackingHead.forward requires an explicit iters argument.")
         n_iters = int(iters)
 
+        H_img, W_img = image_size
         fmap = self.fmap_conv(features.reshape(B * T, -1, H, W)).view(B, T, self.iter_dim, H, W)
         frame0 = fmap[:, 0:1].expand(B, T, -1, -1, -1)
         net = self.hidden_conv(torch.cat([frame0, fmap], dim=2).reshape(B * T, -1, H, W))
         net = net.view(B, T, self.iter_dim, H, W)
-        flow = torch.zeros(B, T, 2, H, W, device=features.device, dtype=features.dtype)
-        info = torch.zeros(B, T, 2, H, W, device=features.device, dtype=features.dtype)
+        flow = self._init_flow(init_track, B, T, H, W, H_img, W_img, features.device, features.dtype)
+        info = self._init_info(init_vis, init_conf, B, T, H, W, features.device, features.dtype)
 
         track_preds, vis_preds, conf_preds = [], [], []
         dense_debug = None
@@ -186,11 +248,7 @@ class DenseWarpTrackingHead(nn.Module):
             update = self.flow_head(net.reshape(B * T, self.iter_dim, H, W)).view(B, T, 4, H, W)
             flow = self._apply_flow_update(flow, update[:, :, :2])
             info = self._apply_info_update(info, update[:, :, 2:])
-            weight = 0.25 * self.upsample_weight(net.reshape(B * T, self.iter_dim, H, W)).view(B, T, -1, H, W)
-            flow_up, info_up = self._upsample_predictions(flow, info, weight)
-            dense_tracks = self._flow_to_tracks(flow_up, image_size)
-            dense_vis = info_up[:, :, 0]
-            dense_conf = info_up[:, :, 1]
+            dense_tracks, dense_vis, dense_conf = self._format_predictions(flow, info, net, image_size)
             track_preds.append(dense_tracks)
             vis_preds.append(dense_vis)
             conf_preds.append(dense_conf)

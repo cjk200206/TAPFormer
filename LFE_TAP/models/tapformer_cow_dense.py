@@ -166,6 +166,9 @@ class TAPFormerCowDense(nn.Module):
         query_xy: torch.Tensor,
         image_size: Tuple[int, int],
         iters: int,
+        init_track: torch.Tensor | None = None,
+        init_vis: torch.Tensor | None = None,
+        init_conf: torch.Tensor | None = None,
         return_debug: bool = False,
     ):
         dense_debug = None
@@ -173,6 +176,9 @@ class TAPFormerCowDense(nn.Module):
             features,
             image_size=image_size,
             iters=iters,
+            init_track=init_track,
+            init_vis=init_vis,
+            init_conf=init_conf,
             return_debug=return_debug,
         )
         if return_debug:

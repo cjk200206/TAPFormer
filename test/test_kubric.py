@@ -7,7 +7,7 @@ Usage:
 
 import argparse
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import sys
 from pathlib import Path
 
@@ -201,6 +201,8 @@ def build_model_from_config(model_cfg, inference_mode="online"):
             cow_max_flow_update_ratio=float(model_cfg.get("cow_max_flow_update_ratio", 0.15)),
             cow_max_flow_magnitude_ratio=float(model_cfg.get("cow_max_flow_magnitude_ratio", 1.0)),
             cow_refine_checkpoint=bool(model_cfg.get("cow_refine_checkpoint", False)),
+            cow_info_update_mode=str(model_cfg.get("cow_info_update_mode", "direct")),
+            cow_online_use_window_init=bool(model_cfg.get("cow_online_use_window_init", False)),
             cow_frontend_type=str(model_cfg.get("cow_frontend_type", "base")),
             cow_anchor_state_mix=float(model_cfg.get("cow_anchor_state_mix", 0.7)),
             cow_anchor_skip_mix=float(model_cfg.get("cow_anchor_skip_mix", 0.7)),

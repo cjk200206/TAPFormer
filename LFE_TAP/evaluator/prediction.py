@@ -334,6 +334,8 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         cow_max_flow_update_ratio=0.15,
         cow_max_flow_magnitude_ratio=1.0,
         cow_refine_checkpoint=False,
+        cow_info_update_mode="direct",
+        cow_online_use_window_init=False,
         cow_frontend_type="base",
         cow_anchor_state_mix=0.7,
         cow_anchor_skip_mix=0.7,
@@ -358,6 +360,7 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 cow_max_flow_update_ratio=cow_max_flow_update_ratio,
                 cow_max_flow_magnitude_ratio=cow_max_flow_magnitude_ratio,
                 cow_refine_checkpoint=cow_refine_checkpoint,
+                cow_info_update_mode=getattr(getattr(trained_model, "dense_head", None), "info_update_mode", cow_info_update_mode),
                 cow_frontend_type=getattr(trained_model, "cow_frontend_type", cow_frontend_type),
                 cow_anchor_state_mix=cow_anchor_state_mix,
                 cow_anchor_skip_mix=cow_anchor_skip_mix,
@@ -385,10 +388,40 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 cow_max_flow_update_ratio=cow_max_flow_update_ratio,
                 cow_max_flow_magnitude_ratio=cow_max_flow_magnitude_ratio,
                 cow_refine_checkpoint=cow_refine_checkpoint,
+                cow_info_update_mode=cow_info_update_mode,
                 cow_frontend_type=cow_frontend_type,
                 cow_anchor_state_mix=cow_anchor_state_mix,
                 cow_anchor_skip_mix=cow_anchor_skip_mix,
             )
+
+        self.cow_online_use_window_init = bool(cow_online_use_window_init)
+
+    @staticmethod
+    def _build_window_init(dense_track, dense_vis, dense_conf, window_len: int, overlap: int):
+        if (
+            dense_track is None
+            or dense_vis is None
+            or dense_conf is None
+            or overlap <= 0
+            or window_len <= 0
+        ):
+            return None, None, None
+
+        copy_len = min(int(overlap), int(window_len), int(dense_track.shape[1]))
+        if copy_len <= 0:
+            return None, None, None
+
+        init_track = dense_track[:, -copy_len:].clone()
+        init_vis = dense_vis[:, -copy_len:].clone()
+        init_conf = dense_conf[:, -copy_len:].clone()
+
+        if copy_len < window_len:
+            pad_len = window_len - copy_len
+            init_track = torch.cat([init_track, init_track[:, -1:].expand(-1, pad_len, -1, -1, -1)], dim=1)
+            init_vis = torch.cat([init_vis, init_vis[:, -1:].expand(-1, pad_len, -1, -1)], dim=1)
+            init_conf = torch.cat([init_conf, init_conf[:, -1:].expand(-1, pad_len, -1, -1)], dim=1)
+
+        return init_track, init_vis, init_conf
 
     @torch.no_grad()
     def forward(
@@ -438,6 +471,9 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         num_windows = max(1, (max(T - S, 0) + step - 1) // step + 1)
         prev_end = 0
         cached_tail = None
+        prev_dense_track = None
+        prev_dense_vis = None
+        prev_dense_conf = None
 
         for ind in range(0, step * num_windows, step):
             if ind >= T:
@@ -445,6 +481,7 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
 
             end = min(ind + S, T)
             overlap = max(0, prev_end - ind)
+            init_track = init_vis = init_conf = None
             if ind == 0:
                 window_query_xy = query_xy
                 window_features = self._encode_window_features(
@@ -465,12 +502,24 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 if cached_tail is None:
                     raise RuntimeError("cached_tail is required for incremental cow-dense online inference")
                 window_features = torch.cat([cached_tail, new_features], dim=1)
+                if self.cow_online_use_window_init:
+                    init_track, init_vis, init_conf = self._build_window_init(
+                        prev_dense_track,
+                        prev_dense_vis,
+                        prev_dense_conf,
+                        window_len=window_features.shape[1],
+                        overlap=overlap,
+                    )
 
-            traj, vis, conf, _, _, _ = self._forward_window(
+            traj, vis, conf, _, _, _, dense_debug = self._forward_window(
                 window_features,
                 window_query_xy,
                 image_size=interp_shape,
                 iters=int(iters),
+                init_track=init_track,
+                init_vis=init_vis,
+                init_conf=init_conf,
+                return_debug=self.cow_online_use_window_init,
             )
 
             if overlap > 0:
@@ -481,6 +530,12 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
             coords_predicted[:, ind:end] = traj
             vis_predicted[:, ind:end] = vis
             conf_predicted[:, ind:end] = conf
+            if self.cow_online_use_window_init:
+                if dense_debug is None:
+                    raise RuntimeError("dense_debug is required when cow_online_use_window_init is enabled")
+                prev_dense_track = dense_debug["dense_tracks"].clone()
+                prev_dense_vis = dense_debug["dense_vis"].clone()
+                prev_dense_conf = dense_debug["dense_conf"].clone()
             cached_tail = window_features[:, -min(step, window_features.shape[1]):].clone()
             prev_end = end
 
