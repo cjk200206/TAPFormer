@@ -203,6 +203,9 @@ def build_model_from_config(model_cfg, inference_mode="online"):
             cow_refine_checkpoint=bool(model_cfg.get("cow_refine_checkpoint", False)),
             cow_info_update_mode=str(model_cfg.get("cow_info_update_mode", "direct")),
             cow_online_use_window_init=bool(model_cfg.get("cow_online_use_window_init", False)),
+            cow_online_use_global_first_anchor=bool(model_cfg.get("cow_online_use_global_first_anchor", False)),
+            cow_online_use_memory_features=bool(model_cfg.get("cow_online_use_memory_features", False)),
+            cow_online_num_memory_frames=int(model_cfg.get("cow_online_num_memory_frames", 10)),
             cow_frontend_type=str(model_cfg.get("cow_frontend_type", "base")),
             cow_anchor_state_mix=float(model_cfg.get("cow_anchor_state_mix", 0.7)),
             cow_anchor_skip_mix=float(model_cfg.get("cow_anchor_skip_mix", 0.7)),
@@ -299,6 +302,7 @@ def main():
     query_grid_size = int(vis_cfg.get("grid_size", 5))
     dense_debug = bool(vis_cfg.get("dense_debug", False))
     dense_overlay_alpha = float(vis_cfg.get("dense_overlay_alpha", 0.5))
+    online_dual_merge_export = bool(vis_cfg.get("online_dual_merge_export", False))
     video_start = max(0, int(vis_cfg.get("video_start", 0)))
     video_length = int(vis_cfg.get("video_length", 0))
     is_cow_dense = str(model_cfg.get("name", "")).lower().strip() in {"tapformer_cow_dense", "cow_dense"}
@@ -311,6 +315,8 @@ def main():
         use_gt_as_prediction = False
     if dense_debug and (not is_cow_dense or inference_mode != "offline"):
         raise ValueError("visualization.dense_debug only supports cow_dense with predictor.inference_mode=offline.")
+    if online_dual_merge_export and (not is_cow_dense or inference_mode != "online"):
+        raise ValueError("visualization.online_dual_merge_export only supports cow_dense with predictor.inference_mode=online.")
     if not 0.0 <= dense_overlay_alpha <= 1.0:
         raise ValueError("visualization.dense_overlay_alpha must be in [0, 1].")
 
@@ -319,6 +325,7 @@ def main():
     print(f"Input mode: {predictor.input_mode}")
     print(f"Query mode: {query_mode}" + (f" (grid_size={query_grid_size})" if query_mode == "grid" else ""))
     print(f"Clip setting: start={video_start}, length={video_length}")
+    print(f"Online dual merge export: {online_dual_merge_export}")
     print(f"Selected {len(seq_indices)} sequences for visualization")
 
     for idx in seq_indices:
@@ -365,6 +372,7 @@ def main():
         events_b = events.unsqueeze(0).to(DEFAULT_DEVICE)
         queries_b = queries.to(DEFAULT_DEVICE)
         img_ifnew = img_ifnew.to(DEFAULT_DEVICE) if isinstance(img_ifnew, torch.Tensor) else img_ifnew
+        merge_variants = None
 
         if use_gt_as_prediction:
             pred_traj = traj.unsqueeze(0).to(DEFAULT_DEVICE)
@@ -372,8 +380,19 @@ def main():
             pred_conf = torch.ones_like(pred_vis, dtype=torch.float32)
             print(f"[{seq_name}] using GT for visualization")
         else:
+            merge_variants = None
             with torch.no_grad():
-                pred_traj, pred_vis, pred_conf = predictor(video_b, events_b, queries_b, img_ifnew=img_ifnew)
+                preds = predictor(
+                    video_b,
+                    events_b,
+                    queries_b,
+                    img_ifnew=img_ifnew,
+                    return_merge_variants=online_dual_merge_export,
+                )
+            if online_dual_merge_export:
+                pred_traj, pred_vis, pred_conf, merge_variants = preds
+            else:
+                pred_traj, pred_vis, pred_conf = preds
 
         print(
             f"[{seq_name}] clip_len={video.shape[0]} traj={tuple(pred_traj.shape)} vis={tuple(pred_vis.shape)} conf={tuple(pred_conf.shape)}"
@@ -396,15 +415,27 @@ def main():
             )
 
         vis_mask = pred_vis.bool() if use_gt_as_prediction else (pred_vis > visibility_threshold)
-
+        keep_filename = seq_name if not online_dual_merge_export else f"{seq_name}_online_keep"
         visualizer.visualize(
             video_b.detach().cpu(),
             events_b.detach().cpu(),
             pred_traj.detach().cpu(),
             vis_mask.detach().cpu(),
-            filename=seq_name,
+            filename=keep_filename,
             video_model=vis_cfg.get("video_model", "events"),
         )
+
+        if merge_variants is not None:
+            overwrite_traj, overwrite_vis, _ = merge_variants["overwrite"]
+            overwrite_mask = overwrite_vis > visibility_threshold
+            visualizer.visualize(
+                video_b.detach().cpu(),
+                events_b.detach().cpu(),
+                overwrite_traj.detach().cpu(),
+                overwrite_mask.detach().cpu(),
+                filename=f"{seq_name}_online_overwrite",
+                video_model=vis_cfg.get("video_model", "events"),
+            )
 
 
 if __name__ == "__main__":

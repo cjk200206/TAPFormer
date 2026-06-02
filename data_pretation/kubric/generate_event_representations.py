@@ -5,6 +5,8 @@ os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import Pool
+import re
+from typing import List, Optional
 
 try:
     import cv2
@@ -18,7 +20,6 @@ except ImportError:
     hdf5plugin = None
 import numpy as np
 from tqdm import tqdm
-from pathlib import Path
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # TAPFormer 根目录
@@ -61,6 +62,37 @@ def _load_sorted_events(events_h5_path):
     time, x, y, p = load_events_h5_columns(events_h5_path)
     idxs_sorted = np.argsort(time)
     return x[idxs_sorted], y[idxs_sorted], p[idxs_sorted], time[idxs_sorted]
+
+
+def _extract_sequence_index(seq_name: str) -> Optional[int]:
+    match = re.search(r"\d+", seq_name)
+    if match is None:
+        return None
+    try:
+        return int(match.group(0))
+    except ValueError:
+        return None
+
+
+def _discover_sequence_dirs(
+    input_path: Path,
+    start_index: Optional[int] = None,
+    end_index: Optional[int] = None,
+) -> List[Path]:
+    seq_candidates = [child for child in sorted(input_path.iterdir()) if child.is_dir()]
+    if start_index is None and end_index is None:
+        return seq_candidates
+
+    seq_dirs: List[Path] = []
+    for pos_idx, seq_dir in enumerate(seq_candidates):
+        seq_idx = _extract_sequence_index(seq_dir.name)
+        idx = seq_idx if seq_idx is not None else pos_idx
+        if start_index is not None and idx < start_index:
+            continue
+        if end_index is not None and idx >= end_index:
+            continue
+        seq_dirs.append(seq_dir)
+    return seq_dirs
 
 
 def check_number_of_files(directory_path, expected_count=95):
@@ -439,6 +471,8 @@ def repeat_process(
     output_path,
     num_repeats,
     generation_function,
+    start_index=None,
+    end_index=None,
     visualize=False,
     n_bins=5,
     dt=0.01,
@@ -446,15 +480,24 @@ def repeat_process(
     input_path = Path(input_path)
     output_path = Path(output_path)
 
-    seq_paths = [
-        str(input_path / fname)
-        for fname in sorted(os.listdir(str(input_path)))
-        if (input_path / fname).is_dir()
-    ]
-    if len(seq_paths) == 0:
-        print(f"[WARN] No sequence directory found in {input_path}")
+    seq_dirs = _discover_sequence_dirs(
+        input_path,
+        start_index=start_index,
+        end_index=end_index,
+    )
+    if len(seq_dirs) == 0:
+        print(
+            f"[WARN] No sequence directory found in {input_path} "
+            f"for range [{start_index}, {end_index})."
+        )
         return
 
+    print(
+        f"[INFO] Selected {len(seq_dirs)} sequence(s) in range "
+        f"[{start_index}, {end_index})."
+    )
+
+    seq_paths = [str(seq_dir) for seq_dir in seq_dirs]
     num_workers = max(1, min(int(num_repeats), len(seq_paths)))
     if visualize and num_workers > 1:
         print("[WARN] visualize=True is incompatible with multi-worker progress display; forcing num_workers=1.")
@@ -490,6 +533,8 @@ def generate(
     n_bins=5,
     visualize=False,
     num_repeats=10,
+    start_index=None,
+    end_index=None,
     **kwargs,
 ):
     input_dir = Path(input_dir)
@@ -520,6 +565,8 @@ def generate(
         output_dir,
         num_repeats,
         generation_function,
+        start_index=start_index,
+        end_index=end_index,
         visualize=visualize,
         n_bins=n_bins,
         dt=dt,
@@ -549,6 +596,18 @@ def parse_args():
     parser.add_argument("--dt", type=float, default=0.01, help="Time interval in seconds.")
     parser.add_argument("--n-bins", type=int, default=5, help="Number of temporal bins.")
     parser.add_argument("--num-repeats", type=int, default=10, help="Number of worker processes.")
+    parser.add_argument(
+        "--start-index",
+        type=int,
+        default=None,
+        help="Start index (inclusive) for selecting sequence ids. If omitted, no lower bound.",
+    )
+    parser.add_argument(
+        "--end-index",
+        type=int,
+        default=None,
+        help="End index (exclusive) for selecting sequence ids. If omitted, no upper bound.",
+    )
     parser.add_argument("--visualize", action="store_true", help="Enable OpenCV visualization while generating.")
     return parser.parse_args()
 
@@ -564,4 +623,6 @@ if __name__ == "__main__":
         n_bins=args.n_bins,
         visualize=args.visualize,
         num_repeats=args.num_repeats,
+        start_index=args.start_index,
+        end_index=args.end_index,
     )

@@ -271,6 +271,8 @@ def _maybe_generate_representations(
     representation_type: str,
     n_bins: int,
     dt: float,
+    start_index: Optional[int],
+    end_index: Optional[int],
 ) -> None:
     if not do_generate:
         return
@@ -287,6 +289,8 @@ def _maybe_generate_representations(
         n_bins=n_bins,
         dts=(dt,),
         visualize=False,
+        start_index=start_index,
+        end_index=end_index,
     )
 
 
@@ -410,6 +414,8 @@ def main() -> None:
         representation_type=args.representation_type,
         n_bins=args.n_bins,
         dt=args.dt,
+        start_index=args.start_index,
+        end_index=args.end_index,
     )
 
 
