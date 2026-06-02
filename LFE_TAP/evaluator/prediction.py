@@ -244,6 +244,34 @@ class TAPFormer_online(TAPFormer):
             
         vis_predicted = torch.sigmoid(vis_predicted)
         conf_predicted = torch.sigmoid(conf_predicted)
+        if return_merge_variants:
+            merge_variants = {
+                "keep": (
+                    coords_predicted.clone(),
+                    vis_predicted.clone(),
+                    conf_predicted.clone(),
+                ),
+                "overwrite": (
+                    coords_predicted_overwrite,
+                    vis_predicted_overwrite,
+                    conf_predicted_overwrite,
+                ),
+            }
+            return coords_predicted, vis_predicted, conf_predicted, merge_variants
+        if return_merge_variants:
+            merge_variants = {
+                "keep": (
+                    coords_predicted.clone(),
+                    vis_predicted.clone(),
+                    conf_predicted.clone(),
+                ),
+                "overwrite": (
+                    coords_predicted_overwrite,
+                    vis_predicted_overwrite,
+                    conf_predicted_overwrite,
+                ),
+            }
+            return coords_predicted, vis_predicted, conf_predicted, merge_variants
         return coords_predicted, vis_predicted, conf_predicted
     
     def forward_window(self, fmaps_pyramid, coords, track_feat_support_pyramid, corr_map_pyramid, vis, conf, attenstion_mask, iters=6):
@@ -336,6 +364,9 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         cow_refine_checkpoint=False,
         cow_info_update_mode="direct",
         cow_online_use_window_init=False,
+        cow_online_use_global_first_anchor=False,
+        cow_online_use_memory_features=False,
+        cow_online_num_memory_frames=10,
         cow_frontend_type="base",
         cow_anchor_state_mix=0.7,
         cow_anchor_skip_mix=0.7,
@@ -395,33 +426,116 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
             )
 
         self.cow_online_use_window_init = bool(cow_online_use_window_init)
+        self.cow_online_use_global_first_anchor = bool(cow_online_use_global_first_anchor)
+        self.cow_online_use_memory_features = bool(cow_online_use_memory_features)
+        self.cow_online_num_memory_frames = int(cow_online_num_memory_frames)
+        if self.cow_online_num_memory_frames < 0:
+            raise ValueError("cow_online_num_memory_frames must be non-negative")
 
     @staticmethod
-    def _build_window_init(dense_track, dense_vis, dense_conf, window_len: int, overlap: int):
-        if (
-            dense_track is None
-            or dense_vis is None
-            or dense_conf is None
-            or overlap <= 0
-            or window_len <= 0
+    def _select_memory_frame_indices(window_idx: int, window_start: int, num_memory_frames: int):
+        if num_memory_frames <= 0 or window_idx == 0:
+            return []
+
+        memory_indices = [0]
+        for offset in [2, 1]:
+            idx = window_start - offset
+            if idx > 0 and idx not in memory_indices:
+                memory_indices.append(idx)
+
+        if window_start > 10:
+            mid_start, mid_end = 5, window_start - 3
+            step = (mid_end - mid_start) / 6
+            for i in range(5):
+                idx = int(mid_start + (i + 1) * step)
+                if idx not in memory_indices:
+                    memory_indices.append(idx)
+
+        if len(memory_indices) > num_memory_frames:
+            memory_indices = sorted(memory_indices)[-num_memory_frames:]
+        return sorted(memory_indices)
+
+    @staticmethod
+    def _gather_memory_features(feature_bank, memory_indices):
+        features = [feature_bank[idx] for idx in memory_indices if idx in feature_bank]
+        if not features:
+            return None
+        return torch.cat(features, dim=1)
+
+    def _encode_global_first_anchor(self, rgbs, events):
+        img_ifnew = torch.ones(1, device=rgbs.device, dtype=rgbs.dtype)
+        return self._encode_window_features(rgbs[:, :1], events[:, :1], img_ifnew=img_ifnew, reset_state=True)
+
+    @staticmethod
+    def _neutral_track_init(batch_size: int, total_len: int, height: int, width: int, device, dtype):
+        y, x = torch.meshgrid(
+            torch.arange(height, device=device, dtype=dtype),
+            torch.arange(width, device=device, dtype=dtype),
+            indexing="ij",
+        )
+        coords = torch.stack([x, y], dim=-1)
+        return coords.unsqueeze(0).unsqueeze(0).expand(batch_size, total_len, -1, -1, -1).clone()
+
+    @staticmethod
+    def _neutral_prob_init(batch_size: int, total_len: int, height: int, width: int, device, dtype):
+        return torch.full((batch_size, total_len, height, width), 0.5, device=device, dtype=dtype)
+
+    def _build_window_init(
+        self,
+        dense_track,
+        dense_vis,
+        dense_conf,
+        window_len: int,
+        overlap: int,
+        memory_len: int,
+        height: int,
+        width: int,
+        device,
+        dtype,
+    ):
+        total_len = int(memory_len) + int(window_len)
+        if total_len <= 0:
+            return None, None, None
+
+        if memory_len <= 0 and (
+            dense_track is None or dense_vis is None or dense_conf is None or overlap <= 0
         ):
             return None, None, None
 
+        init_track = self._neutral_track_init(1, total_len, height, width, device, dtype)
+        init_vis = self._neutral_prob_init(1, total_len, height, width, device, dtype)
+        init_conf = self._neutral_prob_init(1, total_len, height, width, device, dtype)
+
+        if dense_track is None or dense_vis is None or dense_conf is None or overlap <= 0:
+            return init_track, init_vis, init_conf
+
         copy_len = min(int(overlap), int(window_len), int(dense_track.shape[1]))
         if copy_len <= 0:
-            return None, None, None
+            return init_track, init_vis, init_conf
 
-        init_track = dense_track[:, -copy_len:].clone()
-        init_vis = dense_vis[:, -copy_len:].clone()
-        init_conf = dense_conf[:, -copy_len:].clone()
+        start = int(memory_len)
+        end = start + copy_len
+        init_track[:, start:end] = dense_track[:, -copy_len:].to(device=device, dtype=dtype)
+        init_vis[:, start:end] = dense_vis[:, -copy_len:].to(device=device, dtype=dtype)
+        init_conf[:, start:end] = dense_conf[:, -copy_len:].to(device=device, dtype=dtype)
 
         if copy_len < window_len:
             pad_len = window_len - copy_len
-            init_track = torch.cat([init_track, init_track[:, -1:].expand(-1, pad_len, -1, -1, -1)], dim=1)
-            init_vis = torch.cat([init_vis, init_vis[:, -1:].expand(-1, pad_len, -1, -1)], dim=1)
-            init_conf = torch.cat([init_conf, init_conf[:, -1:].expand(-1, pad_len, -1, -1)], dim=1)
+            init_track[:, end : end + pad_len] = init_track[:, end - 1 : end].expand(-1, pad_len, -1, -1, -1)
+            init_vis[:, end : end + pad_len] = init_vis[:, end - 1 : end].expand(-1, pad_len, -1, -1)
+            init_conf[:, end : end + pad_len] = init_conf[:, end - 1 : end].expand(-1, pad_len, -1, -1)
 
         return init_track, init_vis, init_conf
+
+    @staticmethod
+    def _slice_dense_debug_window(dense_debug, memory_len: int):
+        if dense_debug is None or memory_len <= 0:
+            return dense_debug
+        return {
+            "dense_tracks": dense_debug["dense_tracks"][:, memory_len:].clone(),
+            "dense_vis": dense_debug["dense_vis"][:, memory_len:].clone(),
+            "dense_conf": dense_debug["dense_conf"][:, memory_len:].clone(),
+        }
 
     @torch.no_grad()
     def forward(
@@ -434,6 +548,7 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         feat_init=None,
         interp_shape=(384, 512),
         is_train=False,
+        return_merge_variants=False,
     ):
         B, T, C_event, H, W = events.shape
         _, N, _ = queries.shape
@@ -465,6 +580,13 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         coords_predicted = torch.zeros((B, T, N, 2), device=device, dtype=queries.dtype)
         vis_predicted = torch.zeros((B, T, N), device=device, dtype=queries.dtype)
         conf_predicted = torch.zeros((B, T, N), device=device, dtype=queries.dtype)
+        coords_predicted_overwrite = None
+        vis_predicted_overwrite = None
+        conf_predicted_overwrite = None
+        if return_merge_variants:
+            coords_predicted_overwrite = torch.zeros_like(coords_predicted)
+            vis_predicted_overwrite = torch.zeros_like(vis_predicted)
+            conf_predicted_overwrite = torch.zeros_like(conf_predicted)
 
         S = int(self.window_size)
         step = max(1, S // 2)
@@ -474,14 +596,22 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         prev_dense_track = None
         prev_dense_vis = None
         prev_dense_conf = None
+        feature_bank = {} if self.cow_online_use_memory_features else None
+        global_first_feature = None
+        if self.cow_online_use_global_first_anchor:
+            global_first_feature = self._encode_global_first_anchor(rgbs, events)
+            if feature_bank is not None:
+                feature_bank[0] = global_first_feature[:, :1].clone()
 
-        for ind in range(0, step * num_windows, step):
+        for window_idx, ind in enumerate(range(0, step * num_windows, step)):
             if ind >= T:
                 break
 
             end = min(ind + S, T)
             overlap = max(0, prev_end - ind)
             init_track = init_vis = init_conf = None
+            encoded_features = None
+            encoded_start = None
             if ind == 0:
                 window_query_xy = query_xy
                 window_features = self._encode_window_features(
@@ -490,6 +620,8 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                     img_ifnew=img_ifnew[ind:end],
                     reset_state=True,
                 )
+                encoded_features = window_features
+                encoded_start = ind
             else:
                 window_query_xy = coords_predicted[:, ind].clone()
                 new_start = ind + overlap
@@ -502,34 +634,76 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 if cached_tail is None:
                     raise RuntimeError("cached_tail is required for incremental cow-dense online inference")
                 window_features = torch.cat([cached_tail, new_features], dim=1)
-                if self.cow_online_use_window_init:
-                    init_track, init_vis, init_conf = self._build_window_init(
-                        prev_dense_track,
-                        prev_dense_vis,
-                        prev_dense_conf,
-                        window_len=window_features.shape[1],
-                        overlap=overlap,
-                    )
+                encoded_features = new_features
+                encoded_start = new_start
+
+            if feature_bank is not None and encoded_features is not None and encoded_start is not None:
+                for offset in range(encoded_features.shape[1]):
+                    global_idx = encoded_start + offset
+                    if global_idx >= T:
+                        continue
+                    if global_idx == 0 and global_first_feature is not None:
+                        continue
+                    feature_bank[global_idx] = encoded_features[:, offset : offset + 1].clone()
+
+            memory_features = None
+            memory_len = 0
+            if feature_bank is not None:
+                memory_indices = self._select_memory_frame_indices(window_idx, ind, self.cow_online_num_memory_frames)
+                memory_features = self._gather_memory_features(feature_bank, memory_indices)
+                if memory_features is not None:
+                    memory_len = int(memory_features.shape[1])
+
+            tracked_features = window_features if memory_features is None else torch.cat([memory_features, window_features], dim=1)
+
+            if self.cow_online_use_window_init:
+                init_track, init_vis, init_conf = self._build_window_init(
+                    prev_dense_track,
+                    prev_dense_vis,
+                    prev_dense_conf,
+                    window_len=window_features.shape[1],
+                    overlap=overlap,
+                    memory_len=memory_len,
+                    height=interp_shape[0],
+                    width=interp_shape[1],
+                    device=tracked_features.device,
+                    dtype=tracked_features.dtype,
+                )
 
             traj, vis, conf, _, _, _, dense_debug = self._forward_window(
-                window_features,
+                tracked_features,
                 window_query_xy,
                 image_size=interp_shape,
                 iters=int(iters),
                 init_track=init_track,
                 init_vis=init_vis,
                 init_conf=init_conf,
+                first_frame_features=global_first_feature,
                 return_debug=self.cow_online_use_window_init,
             )
 
-            if overlap > 0:
-                traj[:, :overlap] = coords_predicted[:, ind:ind + overlap]
-                vis[:, :overlap] = vis_predicted[:, ind:ind + overlap]
-                conf[:, :overlap] = conf_predicted[:, ind:ind + overlap]
+            if memory_len > 0:
+                traj = traj[:, memory_len:]
+                vis = vis[:, memory_len:]
+                conf = conf[:, memory_len:]
+                dense_debug = self._slice_dense_debug_window(dense_debug, memory_len)
 
-            coords_predicted[:, ind:end] = traj
-            vis_predicted[:, ind:end] = vis
-            conf_predicted[:, ind:end] = conf
+            traj_window = traj[:, : end - ind].clone()
+            vis_window = vis[:, : end - ind].clone()
+            conf_window = conf[:, : end - ind].clone()
+            if return_merge_variants:
+                coords_predicted_overwrite[:, ind:end] = traj_window
+                vis_predicted_overwrite[:, ind:end] = vis_window
+                conf_predicted_overwrite[:, ind:end] = conf_window
+
+            if overlap > 0:
+                traj_window[:, :overlap] = coords_predicted[:, ind:ind + overlap]
+                vis_window[:, :overlap] = vis_predicted[:, ind:ind + overlap]
+                conf_window[:, :overlap] = conf_predicted[:, ind:ind + overlap]
+
+            coords_predicted[:, ind:end] = traj_window
+            vis_predicted[:, ind:end] = vis_window
+            conf_predicted[:, ind:end] = conf_window
             if self.cow_online_use_window_init:
                 if dense_debug is None:
                     raise RuntimeError("dense_debug is required when cow_online_use_window_init is enabled")
@@ -539,4 +713,18 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
             cached_tail = window_features[:, -min(step, window_features.shape[1]):].clone()
             prev_end = end
 
+        if return_merge_variants:
+            merge_variants = {
+                "keep": (
+                    coords_predicted.clone(),
+                    vis_predicted.clone(),
+                    conf_predicted.clone(),
+                ),
+                "overwrite": (
+                    coords_predicted_overwrite,
+                    vis_predicted_overwrite,
+                    conf_predicted_overwrite,
+                ),
+            }
+            return coords_predicted, vis_predicted, conf_predicted, merge_variants
         return coords_predicted, vis_predicted, conf_predicted

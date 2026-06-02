@@ -65,7 +65,32 @@ class EvaluationPredictor(torch.nn.Module):
             video = np.full(video.shape, 127.5, dtype=np.float32)
         return video, events
     
-    def forward(self, video, events, queries=None, img_ifnew=None):
+    def _trim_extra_predictions(self, traj_e, vis_e, conf_e, num_extra_pts):
+        if num_extra_pts <= 0:
+            return traj_e, vis_e, conf_e
+        sl = slice(None, -num_extra_pts)
+        traj_e = traj_e[:, :, sl]
+        vis_e = vis_e[:, :, sl]
+        if conf_e is not None:
+            conf_e = conf_e[:, :, sl]
+        return traj_e, vis_e, conf_e
+
+    def _finalize_predictions(self, traj_e, vis_e, conf_e, queries, H, W):
+        if self.if_test:
+            thr = 0.9
+            vis_e = vis_e > thr
+            for i in range(len(queries)):
+                queries_t = queries[i, : traj_e.size(2), 0].to(torch.int64)
+                arange = torch.arange(0, len(queries_t))
+                traj_e[i, queries_t, arange] = queries[i, : traj_e.size(2), 1:]
+                vis_e[i, queries_t, arange] = True
+
+        traj_e *= traj_e.new_tensor(
+            [(W - 1) / (self.interp_shape[1] - 1), (H - 1) / (self.interp_shape[0] - 1)]
+        )
+        return traj_e, vis_e, conf_e
+
+    def forward(self, video, events, queries=None, img_ifnew=None, return_merge_variants=False):
         B, T, C_r, H, W = video.shape
         C_e = events[0].shape[1]
         if queries is None and self.grid_size > 0:
@@ -86,6 +111,7 @@ class EvaluationPredictor(torch.nn.Module):
         assert B == 1
         
         interp_shape = self.interp_shape
+        merge_variants = None
         
         if isinstance(video, torch.Tensor) and isinstance(events, torch.Tensor):
             video = video.reshape(B * T, C_r, H, W)
@@ -134,42 +160,48 @@ class EvaluationPredictor(torch.nn.Module):
                     sift_size = 0 
         
             model_video, model_events = self._apply_input_mode(video, events)
-            preds = self.model(rgbs=model_video, events=model_events, queries=queries, iters=self.n_iters, img_ifnew=img_ifnew)
+            model_kwargs = dict(
+                rgbs=model_video,
+                events=model_events,
+                queries=queries,
+                iters=self.n_iters,
+                img_ifnew=img_ifnew,
+            )
+            if return_merge_variants:
+                model_kwargs["return_merge_variants"] = True
+            preds = self.model(**model_kwargs)
             traj_e, vis_e = preds[0], preds[1]
-                
             conf_e = preds[2]
+            merge_variants = preds[3] if return_merge_variants and len(preds) > 3 else None
+            num_extra_pts = self.grid_size**2 + sift_size + self.num_uniformly_sampled_pts
             if (
                 queries is not None
                 and sift_size > 0
                 or self.grid_size > 0
                 or self.num_uniformly_sampled_pts > 0
             ):
-                traj_e = traj_e[:, :, : -self.grid_size**2 - sift_size - self.num_uniformly_sampled_pts]
-                vis_e = vis_e[:, :, : -self.grid_size**2 - sift_size - self.num_uniformly_sampled_pts]
-                if conf_e is not None:
-                    conf_e = conf_e[:, :, : -self.grid_size**2 - sift_size - self.num_uniformly_sampled_pts]
-        
-        # if conf_e is not None:
-        #     vis_e = vis_e * conf_e
-        
-        if self.if_test:
-            thr = 0.9
-            vis_e = vis_e > thr
-            for i in range(len(queries)):
-                queries_t = queries[i, : traj_e.size(2), 0].to(torch.int64)
-                arange = torch.arange(0, len(queries_t))
+                traj_e, vis_e, conf_e = self._trim_extra_predictions(traj_e, vis_e, conf_e, num_extra_pts)
+                if merge_variants is not None:
+                    trimmed_variants = {}
+                    for name, (traj_v, vis_v, conf_v) in merge_variants.items():
+                        trimmed_variants[name] = self._trim_extra_predictions(traj_v, vis_v, conf_v, num_extra_pts)
+                    merge_variants = trimmed_variants
 
-                # overwrite the predictions with the query points
-                traj_e[i, queries_t, arange] = queries[i, : traj_e.size(2), 1:]
+        traj_e, vis_e, conf_e = self._finalize_predictions(traj_e, vis_e, conf_e, queries, H, W)
+        if merge_variants is None:
+            return traj_e, vis_e, conf_e
 
-                # correct visibilities, the query points should be visible
-                vis_e[i, queries_t, arange] = True
-                
-        traj_e *= traj_e.new_tensor(
-            [(W - 1) / (self.interp_shape[1] - 1), (H - 1) / (self.interp_shape[0] - 1)]
-        )
-        
-        return traj_e, vis_e, conf_e
+        finalized_variants = {}
+        for name, (traj_v, vis_v, conf_v) in merge_variants.items():
+            finalized_variants[name] = self._finalize_predictions(
+                traj_v.clone(),
+                vis_v.clone(),
+                None if conf_v is None else conf_v.clone(),
+                queries,
+                H,
+                W,
+            )
+        return traj_e, vis_e, conf_e, finalized_variants
                 
     def _process_one_point(self, video, events, query, img_ifnew):
         B, T, C, H, W = video.shape
