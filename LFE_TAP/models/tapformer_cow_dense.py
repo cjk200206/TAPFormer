@@ -169,6 +169,7 @@ class TAPFormerCowDense(nn.Module):
         init_track: torch.Tensor | None = None,
         init_vis: torch.Tensor | None = None,
         init_conf: torch.Tensor | None = None,
+        first_frame_features: torch.Tensor | None = None,
         return_debug: bool = False,
     ):
         dense_debug = None
@@ -179,6 +180,7 @@ class TAPFormerCowDense(nn.Module):
             init_track=init_track,
             init_vis=init_vis,
             init_conf=init_conf,
+            first_frame_features=first_frame_features,
             return_debug=return_debug,
         )
         if return_debug:

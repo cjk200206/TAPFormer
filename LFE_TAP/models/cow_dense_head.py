@@ -214,6 +214,7 @@ class DenseWarpTrackingHead(nn.Module):
         init_track: Optional[torch.Tensor] = None,
         init_vis: Optional[torch.Tensor] = None,
         init_conf: Optional[torch.Tensor] = None,
+        first_frame_features: Optional[torch.Tensor] = None,
         return_debug: bool = False,
     ):
         B, T, _, H, W = features.shape
@@ -223,7 +224,11 @@ class DenseWarpTrackingHead(nn.Module):
 
         H_img, W_img = image_size
         fmap = self.fmap_conv(features.reshape(B * T, -1, H, W)).view(B, T, self.iter_dim, H, W)
-        frame0 = fmap[:, 0:1].expand(B, T, -1, -1, -1)
+        if first_frame_features is not None:
+            frame0_base = self.fmap_conv(first_frame_features.reshape(B, -1, H, W)).view(B, 1, self.iter_dim, H, W)
+        else:
+            frame0_base = fmap[:, 0:1]
+        frame0 = frame0_base.expand(B, T, -1, -1, -1)
         net = self.hidden_conv(torch.cat([frame0, fmap], dim=2).reshape(B * T, -1, H, W))
         net = net.view(B, T, self.iter_dim, H, W)
         flow = self._init_flow(init_track, B, T, H, W, H_img, W_img, features.device, features.dtype)
