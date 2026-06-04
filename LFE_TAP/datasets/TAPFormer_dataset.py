@@ -7,12 +7,21 @@ from LFE_TAP.utils.event.utils import read_input
 from LFE_TAP.utils.dataset_utils import FrameEventData, FrameEventData_test
 
 class TAPFormer_dataset(torch.utils.data.Dataset):
-    def __init__(self, data_root, dt=0.020, representation="time_surfaces_v2_5", fix_num=None, with_gt=True):
+    def __init__(
+        self,
+        data_root,
+        dt=0.020,
+        representation="time_surfaces_v2_5",
+        fix_num=None,
+        with_gt=True,
+        drivtap_gt_mode="current",
+    ):
         self.data_root = data_root
         self.dt = dt
         self.representation = representation
         self.fix_num = fix_num
         self.with_gt = with_gt
+        self.drivtap_gt_mode = drivtap_gt_mode
         self.seq_names = [
             fname
             for fname in os.listdir(data_root)
@@ -40,6 +49,23 @@ class TAPFormer_dataset(torch.utils.data.Dataset):
             event_dir_path = os.path.join(event_root, resolved_dt)
         
         return event_dir_path
+
+    def _prepare_gt_data(self, seq_name, img_time_full, traj_2d, visibility):
+        gt_len = traj_2d.shape[1]
+        if gt_len == len(img_time_full):
+            return traj_2d, visibility, img_time_full
+
+        is_drivtap = os.path.basename(str(self.data_root)) == "DrivTAP"
+        if is_drivtap and gt_len == 2 * len(img_time_full):
+            if self.drivtap_gt_mode == "downsample_even":
+                return traj_2d[:, ::2], visibility[:, ::2], img_time_full
+            if self.drivtap_gt_mode == "current":
+                return traj_2d, visibility, np.linspace(img_time_full[0], img_time_full[-1], gt_len)
+
+        raise ValueError(
+            f"Unsupported GT timeline length for {seq_name}: gt_len={gt_len}, "
+            f"image_timestamps_len={len(img_time_full)}, drivtap_gt_mode={self.drivtap_gt_mode}"
+        )
 
     def __getitem__(self, index):
         gotit =False
@@ -118,6 +144,12 @@ class TAPFormer_dataset(torch.utils.data.Dataset):
             annot_dict = np.load(track_point_path, allow_pickle=True).item()
             traj_2d = annot_dict["coords"]              # N, T, 2
             visibility = annot_dict["visibility"]       # N, T， 1
+            traj_2d, visibility, gt_time_full = self._prepare_gt_data(
+                self.seq_names[index],
+                img_time_full,
+                traj_2d,
+                visibility,
+            )
         
             traj_data = np.transpose(traj_2d, (1, 0, 2))                      # N, T, 2 -> T, N, 2
             visibility = np.transpose(np.logical_not(np.squeeze(visibility)), (1, 0))   # N, T -> T, N
@@ -130,9 +162,9 @@ class TAPFormer_dataset(torch.utils.data.Dataset):
         img_ifnew = np.array(rgb_ifnew)
         img_ifnew_full = np.array(rgb_ifnew_full)
         rgb_times = np.array(rgb_times) * 1e-6
-        rgb_time_full = np.array(img_time_full) * 1e-6
         if self.with_gt:
-            traj_data = np.concatenate([rgb_time_full[:, np.newaxis, np.newaxis].repeat(len(query_points), axis=1), traj_data], axis=2)
+            gt_time_full = np.array(gt_time_full) * 1e-6
+            traj_data = np.concatenate([gt_time_full[:, np.newaxis, np.newaxis].repeat(len(query_points), axis=1), traj_data], axis=2)
             
             query_points = torch.from_numpy(query_points).float()
             query_points = torch.cat([torch.zeros_like(query_points[:, :1]), query_points], dim=1)

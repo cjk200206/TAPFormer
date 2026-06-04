@@ -71,6 +71,7 @@ time_depth = config.get('time_depth', 3)
 dt = config.get('dt', 0.0100)
 if isinstance(dt, str) and dt.lower() == "auto":
     dt = None
+drivtap_gt_mode = config.get('drivtap_gt_mode', 'current')
 grid_size = config.get('grid_size', 0)
 n_iters = config.get('n_iters', 5)
 
@@ -82,6 +83,39 @@ save_results = output_cfg.get('save_results', False)
 save_trajectory = output_cfg.get('save_trajectory', False)
 base_output_dir = output_cfg.get('base_dir', 'output/eval_InivTAP_DrivTAP_subseq')
 input_mode = config.get('input_mode', 'fusion')
+
+def _to_metric_scalar(value):
+    return float(np.asarray(value).reshape(-1)[0])
+
+
+def _compute_dataset_average(entries):
+    metric_names = entries[0]["metrics"].keys()
+    avg_metrics = {
+        metric_name: float(np.mean([entry["metrics"][metric_name] for entry in entries]))
+        for metric_name in metric_names
+    }
+    avg_time = float(np.mean([entry["elapsed_time"] for entry in entries]))
+    seq_names = [entry["seq_name"] for entry in entries]
+    return avg_metrics, avg_time, seq_names
+
+
+def _print_dataset_average(dataset_name, avg_metrics, avg_time):
+    print(f"\n{dataset_name} Dataset Average Results:")
+    for metric_name, metric_value in avg_metrics.items():
+        print(f"  Average {metric_name}: {metric_value:.6f}")
+    print(f"  Average Time per Frame: {avg_time:.6f} seconds")
+
+
+def _write_dataset_summary(base_dir, dataset_name, avg_metrics, avg_time, seq_names):
+    os.makedirs(base_dir, exist_ok=True)
+    summary_path = os.path.join(base_dir, f"{dataset_name}_summary.txt")
+    with open(summary_path, 'w') as f:
+        f.write(f"{dataset_name} Dataset Average Results\n")
+        for metric_name, metric_value in avg_metrics.items():
+            f.write(f"Average {metric_name}: {metric_value:.6f}\n")
+        f.write(f"Average Time per Frame: {avg_time:.6f} seconds\n")
+        f.write("Sequences: " + ", ".join(seq_names) + "\n")
+    print(f"Summary saved to {summary_path}")
 
 # ========== Model Initialization ==========
 print("Loading model...")
@@ -109,8 +143,14 @@ print(f"Input mode: {input_mode}")
 print("\n" + "="*50)
 print("Evaluating on InivTAP and DrivTAP dataset...")
 print("="*50)
+dataset_entries = {"InivTAP": [], "DrivTAP": []}
 datasets_inivtap = TAPFormer_dataset(os.path.join(dataset_dir, "InivTAP"), representation=representation, dt=dt)
-datasets_drivtap = TAPFormer_dataset(os.path.join(dataset_dir, "DrivTAP"), representation=representation, dt=dt)
+datasets_drivtap = TAPFormer_dataset(
+    os.path.join(dataset_dir, "DrivTAP"),
+    representation=representation,
+    dt=dt,
+    drivtap_gt_mode=drivtap_gt_mode,
+)
 for seq_name, dataset_type in EVAL_DATASETS:
     if dataset_type == "InivTAP":
         sample, gotit = datasets_inivtap.get_a_seq(seq_name)
@@ -266,6 +306,14 @@ for seq_name, dataset_type in EVAL_DATASETS:
         pred_tracks,
         query_mode="first",
     )
+    out_metrics = {metric_name: _to_metric_scalar(metric_value) for metric_name, metric_value in out_metrics.items()}
+    dataset_entries[dataset_type].append(
+        {
+            "seq_name": seq_name,
+            "metrics": out_metrics,
+            "elapsed_time": elapsed_time,
+        }
+    )
     print("metrics", out_metrics)
     
     # Visualization
@@ -299,3 +347,11 @@ for seq_name, dataset_type in EVAL_DATASETS:
             f.write("metrics " + str(out_metrics) + "\n")
             f.write(f"time per frame: {elapsed_time}\n")
         print(f"Results saved to {result_path}")
+
+for dataset_name, entries in dataset_entries.items():
+    if not entries:
+        continue
+    avg_metrics, avg_time, seq_names = _compute_dataset_average(entries)
+    _print_dataset_average(dataset_name, avg_metrics, avg_time)
+    if save_results:
+        _write_dataset_summary(base_output_dir, dataset_name, avg_metrics, avg_time, seq_names)
