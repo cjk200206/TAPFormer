@@ -1,8 +1,8 @@
 # Configuration file for EDS and EC dataset evaluation
 
 # Dataset paths
-dataset_dir: "dataset_dir"
-ckpt_root: "tapformer.pth"
+dataset_dir: "data/TAPFormer_Dataset"
+ckpt_root: "output/tapformer.pth"
 
 # Test sequences
 eval_datasets_eds:

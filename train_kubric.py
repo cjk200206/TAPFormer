@@ -1,6 +1,17 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # Set this to the appropriate GPU ID(s) if needed
 import argparse
+
+
+def _configure_visible_devices_from_argv():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--gpus", type=str, default=None)
+    known_args, _ = parser.parse_known_args()
+    if known_args.gpus:
+        os.environ["CUDA_VISIBLE_DEVICES"] = known_args.gpus
+
+
+_configure_visible_devices_from_argv()
+
 import json
 import math
 from datetime import datetime
@@ -27,6 +38,7 @@ def load_config(config_path: str):
 def parse_args():
     parser = argparse.ArgumentParser(description="Train TAPFormer on Kubric/ETAP-format data")
     parser.add_argument("--config", type=str, default="config/config_kubric_train.yaml", help="Path to training YAML config")
+    parser.add_argument("--gpus", type=str, default=None, help="CUDA_VISIBLE_DEVICES value, for example '0' or '0,1'")
     return parser.parse_args()
 
 
@@ -56,6 +68,9 @@ def train_collate(batch):
         clear_video=stack_or_none("clear_video"),
         valid=stack_or_none("valid"),
         seq_name=[s.seq_name for s in samples],
+        query_points=stack_or_none("query_points"),
+        reference_video=stack_or_none("reference_video"),
+        reference_events=stack_or_none("reference_events"),
     )
     gotit = torch.tensor(gotits, dtype=torch.bool)
     return stacked, gotit
@@ -83,6 +98,12 @@ def move_batch_to_device(sample: FrameEventData, device: torch.device) -> FrameE
         sample.valid = sample.valid.to(device, non_blocking=True)
     if sample.img_ifnew is not None and isinstance(sample.img_ifnew, torch.Tensor):
         sample.img_ifnew = sample.img_ifnew.to(device, non_blocking=True)
+    if sample.query_points is not None and isinstance(sample.query_points, torch.Tensor):
+        sample.query_points = sample.query_points.to(device, non_blocking=True)
+    if sample.reference_video is not None and isinstance(sample.reference_video, torch.Tensor):
+        sample.reference_video = sample.reference_video.to(device, non_blocking=True)
+    if sample.reference_events is not None and isinstance(sample.reference_events, torch.Tensor):
+        sample.reference_events = sample.reference_events.to(device, non_blocking=True)
     return sample
 
 
@@ -115,6 +136,7 @@ def build_model_from_config(model_cfg):
             cow_max_flow_update_ratio=float(model_cfg.get("cow_max_flow_update_ratio", 0.15)),
             cow_max_flow_magnitude_ratio=float(model_cfg.get("cow_max_flow_magnitude_ratio", 1.0)),
             cow_refine_checkpoint=bool(model_cfg.get("cow_refine_checkpoint", False)),
+            cow_info_update_mode=str(model_cfg.get("cow_info_update_mode", "direct")),
             cow_frontend_type=str(model_cfg.get("cow_frontend_type", "base")),
             cow_anchor_state_mix=float(model_cfg.get("cow_anchor_state_mix", 0.7)),
             cow_anchor_skip_mix=float(model_cfg.get("cow_anchor_skip_mix", 0.7)),
@@ -214,6 +236,13 @@ def main():
     set_seed(train_cfg.get("seed", 0))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    global_first_train_prob = float(dataset_cfg.get("global_first_train_prob", 0.0))
+    model_name = str(model_cfg.get("name", "tapformer")).lower().strip()
+    if global_first_train_prob > 0.0 and model_name not in {"tapformer_cow_dense", "cow_dense"}:
+        raise ValueError(
+            "dataset.global_first_train_prob > 0 only supports model.name tapformer_cow_dense / cow_dense."
+        )
+
     batch_size = int(train_cfg.get("batch_size", 1))
     if batch_size != 1:
         raise ValueError("TAPFormer forward currently asserts batch_size == 1. Please set train.batch_size: 1")
@@ -242,6 +271,7 @@ def main():
         use_augs=bool(dataset_cfg.get("use_augs", False)),
         if_test=bool(dataset_cfg.get("if_test", False)),
         resample_max_tries=int(dataset_cfg.get("resample_max_tries", 8)),
+        global_first_train_prob=global_first_train_prob,
     )
 
     loader = DataLoader(
@@ -364,7 +394,7 @@ def main():
                 continue
 
             sample = move_batch_to_device(sample, device)
-            queries = build_queries(sample.trajectory, sample.visibility)
+            queries = sample.query_points if sample.query_points is not None else build_queries(sample.trajectory, sample.visibility)
             valid = sample.valid if sample.valid is not None else torch.ones_like(sample.visibility, dtype=torch.float32)
 
             optimizer.zero_grad(set_to_none=True)
@@ -377,6 +407,8 @@ def main():
                     queries,
                     iters=iters,
                     img_ifnew=sample.img_ifnew[0],
+                    reference_rgbs=sample.reference_video,
+                    reference_events=sample.reference_events,
                     is_train=True,
                 )
                 loss_dict = criterion(

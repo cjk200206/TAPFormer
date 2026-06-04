@@ -366,7 +366,16 @@ class FETAPDataset(torch.utils.data.Dataset):
 
         return rgbs, events, trajs
 
-    def crop(self, rgbs, events, trajs, clear_rgbs=None):
+    def crop(
+        self,
+        rgbs,
+        events,
+        trajs,
+        clear_rgbs=None,
+        reference_rgb=None,
+        reference_event=None,
+        reference_points=None,
+    ):
         T, N, _ = trajs.shape
 
         S = len(events)
@@ -380,27 +389,39 @@ class FETAPDataset(torch.utils.data.Dataset):
 
         # simple random crop
         y0 = 0 if self.crop_size[0] >= H_new else (H_new - self.crop_size[0]) // 2
-        # np.random.randint(0,
         x0 = 0 if self.crop_size[1] >= W_new else np.random.randint(0, W_new - self.crop_size[1])
         rgbs = [
             rgb[y0 : y0 + self.crop_size[0], x0 : x0 + self.crop_size[1]]
             for rgb in rgbs
         ]
         events = [
-            event[y0: y0 + self.crop_size[0], x0: x0 + self.crop_size[1]]
+            event[y0 : y0 + self.crop_size[0], x0 : x0 + self.crop_size[1]]
             for event in events
         ]
 
         trajs[:, :, 0] -= x0
         trajs[:, :, 1] -= y0
+
+        outputs = [rgbs, events, trajs]
         if clear_rgbs is not None:
             clear_rgbs = [
                 clear_rgb[y0 : y0 + self.crop_size[0], x0 : x0 + self.crop_size[1]]
                 for clear_rgb in clear_rgbs
             ]
-            return rgbs, events, trajs, clear_rgbs
+            outputs.append(clear_rgbs)
+        if reference_rgb is not None:
+            reference_rgb = reference_rgb[y0 : y0 + self.crop_size[0], x0 : x0 + self.crop_size[1]]
+            outputs.append(reference_rgb)
+        if reference_event is not None:
+            reference_event = reference_event[y0 : y0 + self.crop_size[0], x0 : x0 + self.crop_size[1]]
+            outputs.append(reference_event)
+        if reference_points is not None:
+            reference_points = reference_points.copy()
+            reference_points[:, 0] -= x0
+            reference_points[:, 1] -= y0
+            outputs.append(reference_points)
 
-        return rgbs, events, trajs
+        return tuple(outputs)
     
     
 class KubricMovifDataset(FETAPDataset):
@@ -790,6 +811,7 @@ class KubricMovifDataset_etap(FETAPDataset):
         use_augs=False,
         if_test=False,
         resample_max_tries=8,
+        global_first_train_prob=0.0,
     ):
         super(KubricMovifDataset_etap, self).__init__(
             root_dir=root_dir,
@@ -811,6 +833,7 @@ class KubricMovifDataset_etap(FETAPDataset):
         self.max_crop_offset = 15
         self.if_test = if_test
         self.resample_max_tries = max(1, int(resample_max_tries))
+        self.global_first_train_prob = float(global_first_train_prob)
         self.seq_names = [
             os.path.join(self.root_dir, fname)
             for fname in os.listdir(self.root_dir)
@@ -841,6 +864,7 @@ class KubricMovifDataset_etap(FETAPDataset):
         event_files_all,
         annot_dict,
         random_id=None,
+        use_global_first=False,
     ):
         gotit = True
         rgb_imgs = []
@@ -896,12 +920,30 @@ class KubricMovifDataset_etap(FETAPDataset):
                 print(f"error mrssage:{str(e)}")
                 return [], False, 0, random_id
 
+        reference_rgb = None
+        reference_event = None
+        reference_points = None
+        reference_visibility = None
+        if use_global_first:
+            try:
+                reference_rgb = imageio.v2.imread(os.path.join(rgb_dir_path, rgb_files_all[0]))
+                if reference_rgb.ndim == 3 and reference_rgb.shape[-1] == 4:
+                    reference_rgb = reference_rgb[..., :3]
+                reference_event = read_input(os.path.join(event_dir_path, event_files_all[0]), self.representation)
+            except Exception as e:
+                print(f"error reading reference frame at seq:{seq_name}")
+                print(f"error message:{str(e)}")
+                return [], False, 0, random_id
+
         rgbs = np.stack(rgb_imgs)
         clear_rgbs = np.stack(clear_rgb_imgs)
         events = np.stack(event_imgs)
         if not self.if_test:
             traj_2d = annot_dict["target_points"][:, random_id: random_id + self.seq_len]
             visibility = annot_dict["occluded"][:, random_id: random_id + self.seq_len]
+            if use_global_first:
+                reference_points = annot_dict["target_points"][:, 0].copy()
+                reference_visibility = np.logical_not(annot_dict["occluded"][:, 0].copy())
         else:
             traj_2d = annot_dict["target_points"][:, :-1]
             visibility = annot_dict["occluded"][:, :-1]
@@ -914,7 +956,18 @@ class KubricMovifDataset_etap(FETAPDataset):
             print("new kubric dataset can't use augs!!!")
             rgbs, events, traj_2d = self.add_spatial_augs(rgbs, events, traj_2d, visibility)
         else:
-            rgbs, events, traj_2d, clear_rgbs = self.crop(rgbs, events, traj_2d, clear_rgbs=clear_rgbs)
+            crop_outputs = self.crop(
+                rgbs,
+                events,
+                traj_2d,
+                clear_rgbs=clear_rgbs,
+                reference_rgb=reference_rgb,
+                reference_event=reference_event,
+                reference_points=reference_points,
+            )
+            rgbs, events, traj_2d, clear_rgbs = crop_outputs[:4]
+            if use_global_first:
+                reference_rgb, reference_event, reference_points = crop_outputs[4:7]
 
         visibility[traj_2d[:, :, 0] > self.crop_size[1] - 1] = False
         visibility[traj_2d[:, :, 0] < 0] = False
@@ -932,16 +985,27 @@ class KubricMovifDataset_etap(FETAPDataset):
         traj_2d = traj_2d[:, close_pts_inds]
         visibility = visibility[:, close_pts_inds]
 
-        visibile_pts_first_frame_inds = (visibility[0]).nonzero(as_tuple=False)
-
-        if self.sample_vis_1st_frame:
-            visiblile_pts_inds = visibile_pts_first_frame_inds
+        query_points = None
+        reference_video = None
+        reference_events = None
+        if use_global_first:
+            reference_points = torch.from_numpy(reference_points)[close_pts_inds]
+            reference_visibility = torch.from_numpy(reference_visibility)[close_pts_inds]
+            reference_visibility[reference_points[:, 0] > self.crop_size[1] - 1] = False
+            reference_visibility[reference_points[:, 0] < 0] = False
+            reference_visibility[reference_points[:, 1] > self.crop_size[0] - 1] = False
+            reference_visibility[reference_points[:, 1] < 0] = False
+            visiblile_pts_inds = reference_visibility.nonzero(as_tuple=False).squeeze(-1)
         else:
-            visiblile_pts_mid_frame_inds = (visibility[self.seq_len // 2]).nonzero(as_tuple=False)
-            visibile_pts_last_frame_inds = (visibility[self.seq_len - 1]).nonzero(as_tuple=False)
-            visiblile_pts_inds = torch.cat(
-                (visibile_pts_first_frame_inds, visiblile_pts_mid_frame_inds, visibile_pts_last_frame_inds), dim=0
-            )
+            visibile_pts_first_frame_inds = (visibility[0]).nonzero(as_tuple=False)
+            if self.sample_vis_1st_frame:
+                visiblile_pts_inds = visibile_pts_first_frame_inds
+            else:
+                visiblile_pts_mid_frame_inds = (visibility[self.seq_len // 2]).nonzero(as_tuple=False)
+                visibile_pts_last_frame_inds = (visibility[self.seq_len - 1]).nonzero(as_tuple=False)
+                visiblile_pts_inds = torch.cat(
+                    (visibile_pts_first_frame_inds, visiblile_pts_mid_frame_inds, visibile_pts_last_frame_inds), dim=0
+                ).squeeze(-1)
 
         candidate_count = len(visiblile_pts_inds)
         if candidate_count < self.traj_per_sample and not self.if_test:
@@ -949,20 +1013,36 @@ class KubricMovifDataset_etap(FETAPDataset):
 
         point_inds = torch.randperm(candidate_count)[:self.traj_per_sample]
         if self.choose_long_point:
-            distance = np.linalg.norm(
-                traj_2d[-1, visiblile_pts_inds, :] - traj_2d[0, visiblile_pts_inds, :], axis=-1
-            )[:, 0]
-            weight = distance / np.sum(distance)
-            point_inds = torch.tensor(np.random.choice(len(distance), size=self.traj_per_sample, p=weight))
-            visible_inds_sampled = visiblile_pts_inds[point_inds]
-        else:
-            visible_inds_sampled = visiblile_pts_inds[point_inds]
+            if use_global_first:
+                distance = torch.linalg.vector_norm(
+                    traj_2d[-1, visiblile_pts_inds, :] - reference_points[visiblile_pts_inds, :],
+                    dim=-1,
+                )
+            else:
+                distance = torch.linalg.vector_norm(
+                    traj_2d[-1, visiblile_pts_inds, :] - traj_2d[0, visiblile_pts_inds, :],
+                    dim=-1,
+                )
+            weight = (distance / torch.clamp(distance.sum(), min=1e-6)).cpu().numpy()
+            point_inds = torch.tensor(np.random.choice(candidate_count, size=self.traj_per_sample, p=weight))
+        visible_inds_sampled = visiblile_pts_inds[point_inds]
 
         if len(visible_inds_sampled.shape) == 2:
             visible_inds_sampled = visible_inds_sampled.squeeze(1)
         trajs = traj_2d[:, visible_inds_sampled].float()
         visibles = visibility[:, visible_inds_sampled]
         valid = torch.ones((self.seq_len, self.traj_per_sample))
+
+        if use_global_first:
+            query_xy = reference_points[visible_inds_sampled].float()
+            query_points = torch.cat(
+                [torch.zeros((query_xy.shape[0], 1), dtype=query_xy.dtype), query_xy],
+                dim=-1,
+            )
+            reference_video = torch.from_numpy(reference_rgb[None]).permute(0, 3, 1, 2).float()
+            reference_events = torch.from_numpy(reference_event[None]).float()
+            if "event_stack" not in self.representation:
+                reference_events = reference_events.permute(0, 3, 1, 2)
 
         rgbs = torch.from_numpy(np.stack(rgbs)).permute(0, 3, 1, 2).float()
         clear_rgbs = torch.from_numpy(np.stack(clear_rgbs)).permute(0, 3, 1, 2).float()
@@ -981,6 +1061,9 @@ class KubricMovifDataset_etap(FETAPDataset):
             seq_name=seq_name,
             img_ifnew=img_ifnew,
             clear_video=clear_rgbs,
+            query_points=query_points,
+            reference_video=reference_video,
+            reference_events=reference_events,
         )
         assert sample.img_ifnew is not None, "发现空值样本"
         return sample, gotit, candidate_count, random_id
@@ -1006,6 +1089,12 @@ class KubricMovifDataset_etap(FETAPDataset):
         last_random_id = None
         for _ in range(self.resample_max_tries):
             random_id = np.random.randint(0, max_start)
+            use_global_first = (
+                self.global_first_train_prob > 0.0
+                and not self.use_augs
+                and random_id > 0
+                and np.random.rand() < self.global_first_train_prob
+            )
             sample, gotit, candidate_count, sampled_random_id = self._build_sample_from_window(
                 seq_name,
                 rgb_dir_path,
@@ -1015,6 +1104,7 @@ class KubricMovifDataset_etap(FETAPDataset):
                 event_files,
                 annot_dict,
                 random_id=random_id,
+                use_global_first=use_global_first,
             )
             if gotit:
                 return sample, True

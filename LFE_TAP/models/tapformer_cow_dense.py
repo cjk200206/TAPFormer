@@ -237,16 +237,40 @@ class TAPFormerCowDense(nn.Module):
         _, _, _, dense_debug = dense_outputs
         return dense_debug
 
-    def forward(self, rgbs, events, queries, iters=None, img_ifnew=None, feat_init=None, is_train=False):
+    def forward(
+        self,
+        rgbs,
+        events,
+        queries,
+        iters=None,
+        img_ifnew=None,
+        feat_init=None,
+        is_train=False,
+        reference_rgbs=None,
+        reference_events=None,
+    ):
         _, T, _, H, W, _, _ = self._validate_inputs(rgbs, events, queries, iters)
         queried_frames = queries[:, :, 0].long()
         query_xy = self._prepare_query_xy(queries)
         features = self._encode_features(rgbs, events, img_ifnew=img_ifnew)
+        first_frame_features = None
+        if reference_rgbs is not None and reference_events is not None:
+            reference_ifnew = torch.ones(
+                reference_rgbs.shape[1],
+                device=reference_rgbs.device,
+                dtype=reference_rgbs.dtype,
+            )
+            first_frame_features = self._encode_features(
+                reference_rgbs,
+                reference_events,
+                img_ifnew=reference_ifnew,
+            )
         coords_predicted, vis_predicted, conf_predicted, coord_preds, vis_preds, conf_preds, _ = self._forward_window(
             features,
             query_xy,
             image_size=(H, W),
             iters=int(iters),
+            first_frame_features=first_frame_features,
         )
 
         if is_train:

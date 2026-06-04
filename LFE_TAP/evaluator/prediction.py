@@ -244,34 +244,6 @@ class TAPFormer_online(TAPFormer):
             
         vis_predicted = torch.sigmoid(vis_predicted)
         conf_predicted = torch.sigmoid(conf_predicted)
-        if return_merge_variants:
-            merge_variants = {
-                "keep": (
-                    coords_predicted.clone(),
-                    vis_predicted.clone(),
-                    conf_predicted.clone(),
-                ),
-                "overwrite": (
-                    coords_predicted_overwrite,
-                    vis_predicted_overwrite,
-                    conf_predicted_overwrite,
-                ),
-            }
-            return coords_predicted, vis_predicted, conf_predicted, merge_variants
-        if return_merge_variants:
-            merge_variants = {
-                "keep": (
-                    coords_predicted.clone(),
-                    vis_predicted.clone(),
-                    conf_predicted.clone(),
-                ),
-                "overwrite": (
-                    coords_predicted_overwrite,
-                    vis_predicted_overwrite,
-                    conf_predicted_overwrite,
-                ),
-            }
-            return coords_predicted, vis_predicted, conf_predicted, merge_variants
         return coords_predicted, vis_predicted, conf_predicted
     
     def forward_window(self, fmaps_pyramid, coords, track_feat_support_pyramid, corr_map_pyramid, vis, conf, attenstion_mask, iters=6):

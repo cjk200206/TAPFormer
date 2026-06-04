@@ -1,6 +1,6 @@
 # Configuration file for Kubric/ETAP visualization with TAPFormer fusion + CoW-style dense head
 
-ckpt_root: "output/train_kubric_cow_dense/20260529_210704/best.pth"
+ckpt_root: "output/train_kubric_cow_dense/20260602_160109/best.pth"
 
 dataset:
   data_root: "data/event_kubric/test"
@@ -60,7 +60,7 @@ eval:
   max_seqs: 5
 
 visualization:
-  output_dir: "output/eval_kubric_cow_dense_v1"
+  output_dir: "output/eval_kubric_cow_dense"
   enable: true
   video_model: "events"
   use_clear_video: true

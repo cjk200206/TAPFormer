@@ -1,21 +1,21 @@
 # Configuration file for Aedat4 dataset evaluation
 
 # Dataset paths
-dataset_dir: "dataset_dir"
-ckpt_root: "tapformer.pth"
+dataset_dir: "data/TAPFormer_Dataset"
+ckpt_root: "output/tapformer.pth"
 
 # Test sequences
 eval_datasets:
-  # InivTAP
-  - ["ID_Fast_Fruit", "InivTAP"]
-  - ["ID_Dark_Fruit", "InivTAP"]
-  - ["ID_Fast_Hand", "InivTAP"]
-  - ["ID_OverExp_Fruit", "InivTAP"]
-  - ["ID_OverExp_Fruit2", "InivTAP"]
-  - ["ID_Dynamic_Robot", "InivTAP"]
-  - ["OD_Dynamic", "InivTAP"]
-  - ["OD_Static", "InivTAP"]
-  - ["OD_Basketball", "InivTAP"]
+  # # InivTAP
+  # - ["ID_Fast_Fruit", "InivTAP"]
+  # - ["ID_Dark_Fruit", "InivTAP"]
+  # - ["ID_Fast_Hand", "InivTAP"]
+  # - ["ID_OverExp_Fruit", "InivTAP"]
+  # - ["ID_OverExp_Fruit2", "InivTAP"]
+  # - ["ID_Dynamic_Robot", "InivTAP"]
+  # - ["OD_Dynamic", "InivTAP"]
+  # - ["OD_Static", "InivTAP"]
+  # - ["OD_Basketball", "InivTAP"]
   # DrivTAP
   - ["Day_Tunnel", "DrivTAP"]
   - ["Day_Bridge", "DrivTAP"]
@@ -37,13 +37,14 @@ time_depth: 3
 input_mode: "fusion"  # fusion | frame | event
 
 # Evaluation settings
-dt: 0.0100
+# dt: 0.0100
+dt: auto
 grid_size: 0
 n_iters: 5
 
 # Visualization and output settings
 visualization:
-  enable: false  # Set to true to enable visualization
+  enable: true  # Set to true to enable visualization
   fps: 20  # FPS for visualization videos
 
 output:

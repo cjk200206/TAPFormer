@@ -7,12 +7,18 @@ Usage:
 """
 
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 import sys
 import argparse
 import yaml
 import torch
 import time
 import numpy as np
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from LFE_TAP.evaluator.evaluator import compareTracks
 from LFE_TAP.datasets.EDS_dataset import EDS_dataset

@@ -7,12 +7,18 @@ Usage:
 """
 
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 import sys
 import argparse
 import yaml
 import torch
 import time
 import numpy as np
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from LFE_TAP.datasets.TAPFormer_dataset import TAPFormer_dataset
 from LFE_TAP.evaluator.prediction import TAPFormer_online
@@ -63,6 +69,8 @@ time_depth = config.get('time_depth', 3)
 
 # Evaluation settings
 dt = config.get('dt', 0.0100)
+if isinstance(dt, str) and dt.lower() == "auto":
+    dt = None
 grid_size = config.get('grid_size', 0)
 n_iters = config.get('n_iters', 5)
 

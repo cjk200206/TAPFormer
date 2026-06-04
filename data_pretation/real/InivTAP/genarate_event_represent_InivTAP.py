@@ -24,8 +24,10 @@ def generate_time_surface_single(
     
     timestamps = np.loadtxt(input_seq_dir / "image_timestamps.txt")
     
-    IMG_W, IMG_H = (int(cv2.VideoCapture(str(input_seq_dir / f"{os.path.basename(input_seq_dir)}.mp4")).get(prop)) for prop in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT))
-    
+    # IMG_W, IMG_H = (int(cv2.VideoCapture(str(input_seq_dir / f"{os.path.basename(input_seq_dir)}.mp4")).get(prop)) for prop in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT))
+    IMG_W, IMG_H = (int(cv2.VideoCapture(str(input_seq_dir / "video.mp4")).get(prop)) for prop in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT))
+
+
     new_timestamps = [timestamps[0]]
     for i in range(1, len(timestamps)):
         prev_time = timestamps[i-1]
@@ -202,18 +204,18 @@ if __name__ == "__main__":
     representation_type = "time_surface"
     
     EVAL_DATASETS_Aedat4 = [
-        # ("ID_Fast_Fruit", 0.010),
-        # ("ID_Dark_Fruit", 0.03),
-        # ("ID_OverExp_Fruit", 0.02),
-        # ("ID_OverExp_Fruit2", 0.02),
-        # ("ID_Dynamic_Robot", 0.02),
-        # ("OD_Dynamic", 0.05),
-        # ("OD_Static", 0.05),
-        # ("OD_Basketball", 0.015),
+        ("ID_Fast_Fruit", 0.01),
+        ("ID_Dark_Fruit", 0.03),
+        ("ID_OverExp_Fruit", 0.02),
+        ("ID_OverExp_Fruit2", 0.02),
+        ("ID_Dynamic_Robot", 0.02),
+        ("OD_Dynamic", 0.05),
+        ("OD_Static", 0.05),
+        ("OD_Basketball", 0.015),
     ]    
     
     for dataset_name, dt in EVAL_DATASETS_Aedat4:
-        input_folder = "TAPFormer_Dataset/InivData/" + dataset_name
+        input_folder = "data/TAPFormer_Dataset/InivTAP/" + dataset_name
         
         if representation_type == "time_surface":
             generate_time_surface_single(input_folder, output_dir=input_folder, visualize=False, n_bins=5, dt=dt, center_time=False)

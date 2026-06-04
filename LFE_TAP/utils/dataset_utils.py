@@ -16,7 +16,10 @@ class FrameEventData:
     # optional daa
     clear_video: Optional[torch.Tensor] = None         # (B, S, C_i, H, W)
     valid: Optional[torch.Tensor] = None  # (B, S, N)
-    seq_name: Optional[torch.Tensor] = None 
+    seq_name: Optional[torch.Tensor] = None
+    query_points: Optional[torch.Tensor] = None
+    reference_video: Optional[torch.Tensor] = None
+    reference_events: Optional[torch.Tensor] = None
     
     
 @dataclasses.dataclass(eq=False)

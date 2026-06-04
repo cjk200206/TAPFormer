@@ -1,11 +1,34 @@
 import os
-import cv2
-import numpy as np
+import sys
 from pathlib import Path
+
+import cv2
 import h5py
 import hdf5plugin
+import numpy as np
 
-from data_pretation.real.aedat4.read_aedat4_2_dataset import blosc_opts
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from data_pretation.real.InivTAP.read_aedat4_2_dataset import blosc_opts
+
+
+DRIVTAP_SEQUENCES = [
+    "Day_Tunnel",
+    "Day_Bridge",
+    "Day_Fast",
+    "Night_Road",
+    "Night_Fast",
+]
+
+
+def _get_video_shape(input_seq_dir):
+    capture = cv2.VideoCapture(str(input_seq_dir / "video.mp4"))
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    capture.release()
+    return width, height
 
 def generate_time_surface_single(
     input_seq_dir, output_dir, visualize=False, n_bins=5, dt=0.01, center_time=False, fix_num=None, **kwargs
@@ -25,9 +48,8 @@ def generate_time_surface_single(
     dt_us = dt * 1e6
     dt_us_bin = dt_us / n_bins
     
-    timestamps = np.loadtxt(input_seq_dir / "image_timestamps_full.txt")
-    
-    IMG_W, IMG_H = (int(cv2.VideoCapture(str(input_seq_dir / f"{os.path.basename(input_seq_dir)}.mp4")).get(prop)) for prop in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT))
+    timestamps = np.loadtxt(input_seq_dir / "image_timestamps.txt")
+    IMG_W, IMG_H = _get_video_shape(input_seq_dir)
     
     new_timestamps = [timestamps[0]]
     for i in range(1, len(timestamps)):
@@ -141,7 +163,7 @@ def generate_time_surface_accumulate(
     timestamps = np.loadtxt(input_seq_dir / "image_timestamps.txt")
     image_timestamps = timestamps.copy()
     
-    IMG_W, IMG_H = (int(cv2.VideoCapture(str(input_seq_dir / f"{os.path.basename(input_seq_dir)}.mp4")).get(prop)) for prop in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT))
+    IMG_W, IMG_H = _get_video_shape(input_seq_dir)
     
     new_timestamps = [timestamps[0]]
     for i in range(1, len(timestamps)):
@@ -181,6 +203,7 @@ def generate_time_surface_accumulate(
                 img_ind += 1
             elif t1 > image_timestamps[img_ind]:
                 t0 = image_timestamps[img_ind]
+                img_ind += 1
             else:
                 t0 = image_timestamps[img_ind-1]
 
@@ -223,9 +246,25 @@ def generate_time_surface_accumulate(
                     
 if __name__ == "__main__":
     representation_type = "time_surface"
-    
-    
-    input_folder = ""
-    for dt in [0.003]:
-        generate_time_surface_single(input_folder, output_dir=input_folder, visualize=False, n_bins=5, dt=dt, center_time=False)
-        
+
+    dataset_root = PROJECT_ROOT / "data" / "TAPFormer_Dataset" / "DrivTAP"
+    for sequence_name in DRIVTAP_SEQUENCES:
+        input_folder = dataset_root / sequence_name
+        for dt in [0.003]:
+            if representation_type == "time_surface":
+                generate_time_surface_single(
+                    input_folder,
+                    output_dir=input_folder,
+                    visualize=False,
+                    n_bins=5,
+                    dt=dt,
+                    center_time=False,
+                )
+            elif representation_type == "time_surface_accumulate":
+                generate_time_surface_accumulate(
+                    input_folder,
+                    output_dir=input_folder,
+                    visualize=False,
+                    n_bins=5,
+                    dt=dt,
+                )

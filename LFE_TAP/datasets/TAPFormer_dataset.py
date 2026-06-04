@@ -19,12 +19,32 @@ class TAPFormer_dataset(torch.utils.data.Dataset):
             if os.path.isdir(os.path.join(data_root, fname))
         ]
 
+    def _resolve_event_dir_path(self, seq_name):
+        event_root = os.path.join(str(self.data_root), seq_name, "events", self.representation)
+        
+        if self.fix_num is not None:
+            event_dir_path = os.path.join(event_root, f"fix_num_{self.fix_num}")
+            if not os.path.isdir(event_dir_path):
+                raise FileNotFoundError(f"Event directory not found: {event_dir_path}")
+
+        elif self.dt is not None:
+            event_dir_path = os.path.join(event_root, f"{float(self.dt):.4f}")
+        
+        else:
+            available_dt_dirs = sorted(
+                fname
+                for fname in os.listdir(event_root)
+                if os.path.isdir(os.path.join(event_root, fname))
+            )
+            resolved_dt = available_dt_dirs[0]
+            event_dir_path = os.path.join(event_root, resolved_dt)
+        
+        return event_dir_path
+
     def __getitem__(self, index):
         gotit =False
-        if self.fix_num is not None:
-            event_dir_path = os.path.join(str(self.data_root), self.seq_names[index], "events", self.representation, f"fix_num_{self.fix_num}")
-        else:
-            event_dir_path = os.path.join(str(self.data_root), self.seq_names[index], "events", self.representation, f"{self.dt:.4f}")
+        event_dir_path = self._resolve_event_dir_path(self.seq_names[index])
+
         rgb_path = os.path.join(str(self.data_root), self.seq_names[index], "images_corrected")
         track_point_path = os.path.join(str(self.data_root), self.seq_names[index], "annotations.npy")
         img_time_full = np.stack(np.loadtxt(os.path.join(str(self.data_root), self.seq_names[index], "image_timestamps.txt")))
