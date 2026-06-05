@@ -1,0 +1,70 @@
+# Configuration file for InivTAP and DrivTAP evaluation with TAPFormer Cow Dense
+
+# Dataset paths
+dataset_dir: "data/TAPFormer_Dataset"
+ckpt_root: "output/train_kubric_cow_dense/20260602_164220/best.pth"
+
+# Test sequences
+eval_datasets:
+  # InivTAP
+  - ["ID_Fast_Fruit", "InivTAP"]
+  - ["ID_Dark_Fruit", "InivTAP"]
+  - ["ID_Fast_Hand", "InivTAP"]
+  - ["ID_OverExp_Fruit", "InivTAP"]
+  - ["ID_OverExp_Fruit2", "InivTAP"]
+  - ["ID_Dynamic_Robot", "InivTAP"]
+  - ["OD_Dynamic", "InivTAP"]
+  - ["OD_Static", "InivTAP"]
+  - ["OD_Basketball", "InivTAP"]
+  # DrivTAP
+  - ["Day_Tunnel", "DrivTAP"]
+  - ["Day_Bridge", "DrivTAP"]
+  - ["Day_Fast", "DrivTAP"]
+  - ["Night_Road", "DrivTAP"]
+  - ["Night_Fast", "DrivTAP"]
+
+# Model configuration
+model_name: "tapformer_cow_dense"
+representation: "time_surfaces_v2_5"
+stride: 4
+corr_levels: 3
+backbone: "basic"
+window_size: 12
+corr_radius: 3
+hidden_size: 384
+space_depth: 3
+time_depth: 3
+input_mode: "fusion"
+cow_refine_model: "vits"
+cow_refine_patch_size: 4
+cow_refine_blocks: null
+cow_temporal_interleave_stride: 2
+cow_tracking_down_ratio: 2
+cow_limit_flow: false
+cow_max_flow_update_ratio: 0.15
+cow_max_flow_magnitude_ratio: 1.0
+cow_refine_checkpoint: true
+cow_info_update_mode: "iterative"
+cow_online_use_window_init: false
+cow_online_use_global_first_anchor: true
+cow_online_use_memory_features: false
+cow_online_num_memory_frames: 12
+cow_frontend_type: "base"
+cow_anchor_state_mix: 0.7
+cow_anchor_skip_mix: 0.7
+
+# Evaluation settings
+grid_size: 0
+n_iters: 5
+dt: auto
+drivtap_gt_mode: downsample_even
+
+# Visualization and output settings
+visualization:
+  enable: true
+  fps: 20
+
+output:
+  save_results: false
+  save_trajectory: false
+  base_dir: "output/eval_aedat4_subseq_cow_dense"

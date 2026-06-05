@@ -91,7 +91,22 @@ class EvaluationPredictor(torch.nn.Module):
         return traj_e, vis_e, conf_e
 
     def forward(self, video, events, queries=None, img_ifnew=None, return_merge_variants=False):
-        B, T, C_r, H, W = video.shape
+        if queries is None:
+            if not isinstance(video, torch.Tensor):
+                raise ValueError("queries can only be omitted when video is a torch.Tensor")
+            B, T, C_r, H, W = video.shape
+        else:
+            device = queries.device
+            if not isinstance(video, torch.Tensor):
+                video = torch.as_tensor(np.asarray(video), device=device)
+            if not isinstance(events, torch.Tensor):
+                events = torch.as_tensor(np.asarray(events), device=device)
+            if not torch.is_floating_point(video):
+                video = video.float()
+            if not torch.is_floating_point(events):
+                events = events.float()
+            B, T, C_r, H, W = video.shape
+
         C_e = events[0].shape[1]
         if queries is None and self.grid_size > 0:
             grid_pts = get_points_on_a_grid(
@@ -113,13 +128,12 @@ class EvaluationPredictor(torch.nn.Module):
         interp_shape = self.interp_shape
         merge_variants = None
         
-        if isinstance(video, torch.Tensor) and isinstance(events, torch.Tensor):
-            video = video.reshape(B * T, C_r, H, W)
-            events = events.reshape(B * T, C_e, H, W)
-            video = F.interpolate(video, tuple(interp_shape), mode="bilinear", align_corners=True)
-            events = F.interpolate(events, tuple(interp_shape), mode="bilinear", align_corners=True)
-            video = video.reshape(B, T, C_r, interp_shape[0], interp_shape[1])
-            events = events.reshape(B, T, C_e, interp_shape[0], interp_shape[1])
+        video = video.reshape(B * T, C_r, H, W)
+        events = events.reshape(B * T, C_e, H, W)
+        video = F.interpolate(video, tuple(interp_shape), mode="bilinear", align_corners=True)
+        events = F.interpolate(events, tuple(interp_shape), mode="bilinear", align_corners=True)
+        video = video.reshape(B, T, C_r, interp_shape[0], interp_shape[1])
+        events = events.reshape(B, T, C_e, interp_shape[0], interp_shape[1])
 
         queries[:, :, 1] *= (interp_shape[1] - 1) / (W - 1)
         queries[:, :, 2] *= (interp_shape[0] - 1) / (H - 1)

@@ -522,21 +522,29 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         is_train=False,
         return_merge_variants=False,
     ):
+        device = queries.device
+        if not isinstance(rgbs, torch.Tensor):
+            rgbs = torch.as_tensor(np.asarray(rgbs), device=device)
+        if not isinstance(events, torch.Tensor):
+            events = torch.as_tensor(np.asarray(events), device=device)
+        if not torch.is_floating_point(rgbs):
+            rgbs = rgbs.float()
+        if not torch.is_floating_point(events):
+            events = events.float()
+
         B, T, C_event, H, W = events.shape
         _, N, _ = queries.shape
         _, _, C_img, _, _ = rgbs.shape
-        device = queries.device
         if B != 1:
             raise AssertionError("TAPFormerCowDense_online expects batch_size == 1")
 
         queries = queries.clone()
-        if isinstance(rgbs, torch.Tensor) and isinstance(events, torch.Tensor):
-            rgbs_flat = rgbs.reshape(B * T, C_img, H, W)
-            events_flat = events.reshape(B * T, C_event, H, W)
-            rgbs_flat = F.interpolate(rgbs_flat, tuple(interp_shape), mode="bilinear", align_corners=True)
-            events_flat = F.interpolate(events_flat, tuple(interp_shape), mode="bilinear", align_corners=True)
-            rgbs = rgbs_flat.reshape(B, T, C_img, interp_shape[0], interp_shape[1])
-            events = events_flat.reshape(B, T, C_event, interp_shape[0], interp_shape[1])
+        rgbs_flat = rgbs.reshape(B * T, C_img, H, W)
+        events_flat = events.reshape(B * T, C_event, H, W)
+        rgbs_flat = F.interpolate(rgbs_flat, tuple(interp_shape), mode="bilinear", align_corners=True)
+        events_flat = F.interpolate(events_flat, tuple(interp_shape), mode="bilinear", align_corners=True)
+        rgbs = rgbs_flat.reshape(B, T, C_img, interp_shape[0], interp_shape[1])
+        events = events_flat.reshape(B, T, C_event, interp_shape[0], interp_shape[1])
 
         queries[:, :, 1] *= (interp_shape[1] - 1) / (W - 1)
         queries[:, :, 2] *= (interp_shape[0] - 1) / (H - 1)
@@ -547,7 +555,7 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         elif isinstance(img_ifnew, torch.Tensor):
             img_ifnew = img_ifnew.to(device=rgbs.device, dtype=rgbs.dtype)
         else:
-            img_ifnew = torch.as_tensor(np.asarray(img_ifnew), device=rgbs.device, dtype=rgbs.dtype)
+            img_ifnew = torch.as_tensor(np.asarray(img_ifnew), device=rgbs.device).to(dtype=rgbs.dtype)
 
         coords_predicted = torch.zeros((B, T, N, 2), device=device, dtype=queries.dtype)
         vis_predicted = torch.zeros((B, T, N), device=device, dtype=queries.dtype)

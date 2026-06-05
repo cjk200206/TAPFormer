@@ -21,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from LFE_TAP.datasets.TAPFormer_dataset import TAPFormer_dataset
-from LFE_TAP.evaluator.prediction import TAPFormer_online
+from LFE_TAP.evaluator.model_factory import build_eval_model_from_config
 from LFE_TAP.evaluator.evaluation_pred import EvaluationPredictor
 from LFE_TAP.utils.visualizer import Visualizer
 from LFE_TAP.evaluator.evaluator import compute_tapvid_metrics
@@ -55,17 +55,6 @@ ckpt_root = config['ckpt_root']
 EVAL_DATASETS = config['eval_datasets']
 
 representation = config['representation']
-stride = config.get('stride')
-
-# Auto-detect backbone
-corr_levels = config.get('corr_levels')
-backbone = config.get('backbone')
-# Model configuration
-window_size = config.get('window_size', 16)
-corr_radius = config.get('corr_radius', 3)
-hidden_size = config.get('hidden_size', 384)
-space_depth = config.get('space_depth', 3)
-time_depth = config.get('time_depth', 3)
 
 # Evaluation settings
 dt = config.get('dt', 0.0100)
@@ -119,16 +108,7 @@ def _write_dataset_summary(base_dir, dataset_name, avg_metrics, avg_time, seq_na
 
 # ========== Model Initialization ==========
 print("Loading model...")
-model = TAPFormer_online(
-    window_size=window_size,
-    stride=stride,
-    corr_radius=corr_radius,
-    corr_levels=corr_levels,
-    backbone=backbone,
-    hidden_size=hidden_size,
-    space_depth=space_depth,
-    time_depth=time_depth
-)
+model = build_eval_model_from_config(config, inference_mode="online")
 
 # Load checkpoint
 state_dict = torch.load(ckpt_root, map_location=DEFAULT_DEVICE)
