@@ -52,6 +52,10 @@ cow_online_num_memory_frames: 12
 cow_frontend_type: "base"
 cow_anchor_state_mix: 0.7
 cow_anchor_skip_mix: 0.7
+eval_resolution: [448, 560]
+
+eval_model:
+  backend: "tapformer_family"
 
 # Evaluation settings
 grid_size: 0

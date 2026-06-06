@@ -12,24 +12,24 @@ dataset:
   choose_long_point: false
   use_augs: false
   if_test: false
-  global_first_train_prob: 0.3
+  global_first_train_prob: 0.0
 
 train:
   save_dir: "output/train_kubric_cow_dense"
-  epochs: 20
+  epochs: 35
   batch_size: 1
   num_workers: 8
   shuffle: true
   pin_memory: true
   drop_last: true
-  lr: 0.0005
+  lr: 0.0001
   # lr: 0.0002
   weight_decay: 0.0001
   grad_clip_norm: 1.0
   scheduler:
     enabled: true
     type: "cosine"
-    warmup_steps: 1000
+    warmup_steps: 3000
     min_lr: 1.0e-6
     step_on: "step"
   iters: 5

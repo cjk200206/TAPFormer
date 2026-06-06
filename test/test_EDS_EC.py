@@ -7,7 +7,7 @@ Usage:
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import sys
 import argparse
 import yaml
@@ -23,8 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from LFE_TAP.evaluator.evaluator import compareTracks
 from LFE_TAP.datasets.EDS_dataset import EDS_dataset
 from LFE_TAP.datasets.EC_dataset import EC_dataset
-from LFE_TAP.evaluator.model_factory import build_eval_model_from_config
-from LFE_TAP.evaluator.evaluation_pred import EvaluationPredictor
+from LFE_TAP.evaluator.model_factory import build_eval_predictor_from_config
 from LFE_TAP.utils.visualizer import Visualizer
 
 # ========== Configuration ==========
@@ -36,8 +35,10 @@ DEFAULT_DEVICE = ('cuda' if torch.cuda.is_available() else
 
 def load_config(config_path):
     """Load configuration from YAML file."""
+    config_path = Path(config_path).expanduser().resolve()
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
+    config["__config_path__"] = str(config_path)
     return config
 
 def parse_args():
@@ -46,6 +47,19 @@ def parse_args():
     parser.add_argument('--config', type=str, default='config/config_eds_ec.yaml',
                         help='Path to configuration YAML file')
     return parser.parse_args()
+
+
+def _predict_sequence(predictor, sample):
+    predictor_device = getattr(predictor, "device", torch.device(DEFAULT_DEVICE))
+    queries = sample.query_points[np.newaxis, ...].to(predictor_device)
+    sample.video = sample.video[np.newaxis, ...]
+    sample.events = sample.events[np.newaxis, ...]
+
+    start = time.time()
+    pred_tracks = predictor(sample.video, sample.events, queries, img_ifnew=sample.img_ifnew)
+    elapsed_time = (time.time() - start) / sample.events.shape[1]
+    return pred_tracks, elapsed_time
+
 
 # Parse arguments and load config
 args = parse_args()
@@ -72,18 +86,32 @@ enable_visualization = vis_cfg.get('enable', False)
 save_results = output_cfg.get('save_results', False)
 save_trajectory = output_cfg.get('save_trajectory', False)
 input_mode = config.get('input_mode', 'fusion')
+eval_backend = str(config.get('eval_model', {}).get('backend', 'tapformer_family')).lower().strip()
 
-# ========== Model Initialization ==========
-print("Loading model...")
-model = build_eval_model_from_config(config, inference_mode="online")
-
-# Load checkpoint
-state_dict = torch.load(ckpt_root, map_location=DEFAULT_DEVICE)
-if "model" in state_dict:
-    state_dict = state_dict["model"]
-model.load_state_dict(state_dict, strict=False)
-model.eval()
-print("Model loaded successfully!")
+# ========== Predictor Initialization ==========
+print("Loading evaluation predictor...")
+predictor_eds = build_eval_predictor_from_config(
+    config,
+    grid_size=eds_cfg['grid_size'],
+    local_grid_size=0,
+    single_point=False,
+    num_uniformly_sampled_pts=0,
+    n_iters=eds_cfg['n_iters'],
+    if_test=True,
+    input_mode=input_mode,
+)
+predictor_ec = predictor_eds if eval_backend == 'cowtracker' else build_eval_predictor_from_config(
+    config,
+    grid_size=ec_cfg['grid_size'],
+    local_grid_size=0,
+    single_point=False,
+    num_uniformly_sampled_pts=0,
+    n_iters=ec_cfg['n_iters'],
+    if_test=True,
+    input_mode=input_mode,
+)
+print("Predictor loaded successfully!")
+print(f"Predictor backend: {eval_backend}")
 print(f"Input mode: {input_mode}")
 
 # ========== Evaluation on EDS Dataset ==========
@@ -91,8 +119,8 @@ print("\n" + "="*50)
 print("Evaluating on EDS dataset...")
 print("="*50)
 fa, efa, t_l = [], [], []
+datasets = EDS_dataset(os.path.join(dataset_dir, "eds_subseq"), representation=representation, dt=eds_cfg['dt'])
 for seq_name in EVAL_DATASETS_EDS:
-    datasets = EDS_dataset(os.path.join(dataset_dir, "eds_subseq"), representation=representation, dt=eds_cfg['dt'])
     sample, gotit = datasets.get_a_seq(seq_name)
     if not gotit:
         continue
@@ -106,32 +134,8 @@ for seq_name in EVAL_DATASETS_EDS:
     vis = None
     if enable_visualization:
         vis = Visualizer(output_dir, fps=vis_cfg.get('fps', 50))
-    
-    grid_size = eds_cfg['grid_size'] 
- 
-    predictor = EvaluationPredictor(
-                model,
-                grid_size=grid_size,
-                local_grid_size=0,
-                single_point=False,
-                num_uniformly_sampled_pts=0,
-                n_iters=eds_cfg['n_iters'],
-                if_test=True,
-                input_mode=input_mode,
-            )
-    
-    if torch.cuda.is_available():
-        predictor.model = predictor.model.cuda()
 
-    queries = sample.query_points[np.newaxis, ...]
-    queries = queries.to(DEFAULT_DEVICE)
-    
-    sample.video = sample.video[np.newaxis, ...]
-    sample.events = sample.events[np.newaxis, ...]
-    
-    start = time.time()
-    pred_tracks = predictor(sample.video, sample.events, queries, img_ifnew=sample.img_ifnew)
-    elapsed_time = (time.time()-start)/sample.events.shape[1]
+    pred_tracks, elapsed_time = _predict_sequence(predictor_eds, sample)
     t_l.append(elapsed_time)
     print("time per frame:", elapsed_time)
     
@@ -151,7 +155,7 @@ for seq_name in EVAL_DATASETS_EDS:
     t = sample.segmentation.astype(float)
     t *= 1e-6
     t = t.reshape(1, -1, 1, 1).repeat(N, axis=2)
-    pred_trajectory = np.concatenate((ind, t, pred_tracks[0].cpu().numpy()), axis=3)
+    pred_trajectory = np.concatenate((ind, t, pred_tracks[0].detach().cpu().numpy()), axis=3)
     pred_trajectory_txt = np.transpose(pred_trajectory, (0, 2, 1, 3)).reshape(-1, 4)
     
     # Save trajectory if requested
@@ -212,32 +216,8 @@ for seq_name in EVAL_DATASETS_EC:
     vis = None
     if enable_visualization:
         vis = Visualizer(output_dir, fps=vis_cfg.get('fps_ec', 10))
-    
-    grid_size = ec_cfg['grid_size']
- 
-    predictor = EvaluationPredictor(
-                model,
-                grid_size=grid_size,
-                local_grid_size=0,
-                single_point=False,
-                num_uniformly_sampled_pts=0,
-                n_iters=ec_cfg['n_iters'],
-                if_test=True,
-                input_mode=input_mode,
-            )
-    
-    if torch.cuda.is_available():
-        predictor.model = predictor.model.cuda()
 
-    queries = sample.query_points[np.newaxis, ...]
-    queries = queries.to(DEFAULT_DEVICE)
-    
-    sample.video = sample.video[np.newaxis, ...]
-    sample.events = sample.events[np.newaxis, ...]
-    
-    start = time.time()
-    pred_tracks = predictor(sample.video, sample.events, queries, img_ifnew=sample.img_ifnew)
-    elapsed_time = (time.time()-start)/sample.events.shape[1]
+    pred_tracks, elapsed_time = _predict_sequence(predictor_ec, sample)
     t_l.append(elapsed_time)
     
     # Visualization
@@ -256,7 +236,7 @@ for seq_name in EVAL_DATASETS_EC:
     t = sample.segmentation.astype(float)
     t *= 1e-6
     t = t.reshape(1, -1, 1, 1).repeat(N, axis=2)
-    pred_trajectory = np.concatenate((ind, t, pred_tracks[0].cpu().numpy()), axis=3)
+    pred_trajectory = np.concatenate((ind, t, pred_tracks[0].detach().cpu().numpy()), axis=3)
     pred_trajectory_txt = np.transpose(pred_trajectory, (0, 2, 1, 3)).reshape(-1, 4)
     
     # Save trajectory if requested

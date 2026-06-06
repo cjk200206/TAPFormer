@@ -35,6 +35,10 @@ hidden_size: 384
 space_depth: 3
 time_depth: 3
 input_mode: "fusion"  # fusion | frame | event
+eval_resolution: [448, 560]
+
+eval_model:
+  backend: "tapformer_family"
 
 # Evaluation settings
 # dt: 0.0100

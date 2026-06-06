@@ -7,7 +7,7 @@ Usage:
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import sys
 import argparse
 import yaml
@@ -21,8 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from LFE_TAP.datasets.TAPFormer_dataset import TAPFormer_dataset
-from LFE_TAP.evaluator.model_factory import build_eval_model_from_config
-from LFE_TAP.evaluator.evaluation_pred import EvaluationPredictor
+from LFE_TAP.evaluator.model_factory import build_eval_predictor_from_config
 from LFE_TAP.utils.visualizer import Visualizer
 from LFE_TAP.evaluator.evaluator import compute_tapvid_metrics
 
@@ -32,8 +31,10 @@ DEFAULT_DEVICE = ('cuda' if torch.cuda.is_available() else
 
 def load_config(config_path):
     """Load configuration from YAML file."""
+    config_path = Path(config_path).expanduser().resolve()
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
+    config["__config_path__"] = str(config_path)
     return config
 
 def parse_args():
@@ -43,35 +44,6 @@ def parse_args():
                         help='Path to configuration YAML file')
     return parser.parse_args()
 
-
-# Parse arguments and load config
-args = parse_args()
-config = load_config(args.config)
-
-# Extract configuration
-dataset_dir = config['dataset_dir']
-ckpt_root = config['ckpt_root']
-
-EVAL_DATASETS = config['eval_datasets']
-
-representation = config['representation']
-
-# Evaluation settings
-dt = config.get('dt', 0.0100)
-if isinstance(dt, str) and dt.lower() == "auto":
-    dt = None
-drivtap_gt_mode = config.get('drivtap_gt_mode', 'current')
-grid_size = config.get('grid_size', 0)
-n_iters = config.get('n_iters', 5)
-
-# Visualization and output settings
-vis_cfg = config.get('visualization', {})
-output_cfg = config.get('output', {})
-enable_visualization = vis_cfg.get('enable', False)
-save_results = output_cfg.get('save_results', False)
-save_trajectory = output_cfg.get('save_trajectory', False)
-base_output_dir = output_cfg.get('base_dir', 'output/eval_InivTAP_DrivTAP_subseq')
-input_mode = config.get('input_mode', 'fusion')
 
 def _to_metric_scalar(value):
     return float(np.asarray(value).reshape(-1)[0])
@@ -106,17 +78,57 @@ def _write_dataset_summary(base_dir, dataset_name, avg_metrics, avg_time, seq_na
         f.write("Sequences: " + ", ".join(seq_names) + "\n")
     print(f"Summary saved to {summary_path}")
 
-# ========== Model Initialization ==========
-print("Loading model...")
-model = build_eval_model_from_config(config, inference_mode="online")
 
-# Load checkpoint
-state_dict = torch.load(ckpt_root, map_location=DEFAULT_DEVICE)
-if "model" in state_dict:
-    state_dict = state_dict["model"]
-model.load_state_dict(state_dict, strict=False)
-model.eval()
-print("Model loaded successfully!")
+def _predict_sequence(predictor, sample):
+    predictor_device = getattr(predictor, "device", torch.device(DEFAULT_DEVICE))
+    queries = sample.query_points[np.newaxis, ...].to(predictor_device)
+    sample.video = sample.video[np.newaxis, ...]
+    sample.events = sample.events[np.newaxis, ...]
+    sample.trajectory = sample.trajectory[np.newaxis, ...]
+    sample.visibility = sample.visibility[np.newaxis, ...]
+
+    start = time.time()
+    pred_tracks = predictor(sample.video, sample.events, queries, img_ifnew=sample.img_ifnew)
+    elapsed_time = (time.time() - start) / sample.events.shape[1]
+    return pred_tracks, elapsed_time
+
+
+# Parse arguments and load config
+args = parse_args()
+config = load_config(args.config)
+
+# Extract configuration
+dataset_dir = config['dataset_dir']
+EVAL_DATASETS = config['eval_datasets']
+representation = config['representation']
+dt = config.get('dt', 0.0100)
+if isinstance(dt, str) and dt.lower() == "auto":
+    dt = None
+drivtap_gt_mode = config.get('drivtap_gt_mode', 'current')
+grid_size = config.get('grid_size', 0)
+n_iters = config.get('n_iters', 5)
+vis_cfg = config.get('visualization', {})
+output_cfg = config.get('output', {})
+enable_visualization = vis_cfg.get('enable', False)
+save_results = output_cfg.get('save_results', False)
+save_trajectory = output_cfg.get('save_trajectory', False)
+base_output_dir = output_cfg.get('base_dir', 'output/eval_InivTAP_DrivTAP_subseq')
+input_mode = config.get('input_mode', 'fusion')
+eval_backend = str(config.get('eval_model', {}).get('backend', 'tapformer_family')).lower().strip()
+
+# ========== Predictor Initialization ==========
+print("Loading evaluation predictor...")
+predictor = build_eval_predictor_from_config(
+    config,
+    grid_size=grid_size,
+    local_grid_size=0,
+    single_point=False,
+    num_uniformly_sampled_pts=0,
+    n_iters=n_iters,
+    input_mode=input_mode,
+)
+print("Predictor loaded successfully!")
+print(f"Predictor backend: {eval_backend}")
 print(f"Input mode: {input_mode}")
 
 # ========== Evaluation ==========
@@ -136,6 +148,8 @@ for seq_name, dataset_type in EVAL_DATASETS:
         sample, gotit = datasets_inivtap.get_a_seq(seq_name)
     elif dataset_type == "DrivTAP":
         sample, gotit = datasets_drivtap.get_a_seq(seq_name)
+    else:
+        continue
     if not gotit:
         continue
     
@@ -148,44 +162,19 @@ for seq_name, dataset_type in EVAL_DATASETS:
     vis = None
     if enable_visualization:
         vis = Visualizer(output_dir, fps=vis_cfg.get('fps', 20))
- 
-    predictor = EvaluationPredictor(
-                model,
-                grid_size=grid_size,
-                local_grid_size=0,
-                single_point=False,
-                num_uniformly_sampled_pts=0,
-                n_iters=n_iters,
-                input_mode=input_mode,
-            )
-    
-    if torch.cuda.is_available():
-        predictor.model = predictor.model.cuda()
 
-    queries = sample.query_points[np.newaxis, ...]
-    queries = queries.to(DEFAULT_DEVICE)
-    
-    
-    sample.video = sample.video[np.newaxis, ...]
-    sample.events = sample.events[np.newaxis, ...]
-    sample.trajectory = sample.trajectory[np.newaxis, ...]
-    sample.visibility = sample.visibility[np.newaxis, ...]
-    
-    start = time.time()
-    pred_tracks = predictor(sample.video, sample.events, queries, img_ifnew=sample.img_ifnew)
-    end = time.time()
-    elapsed_time = (end-start)/sample.events.shape[1]
+    pred_tracks, elapsed_time = _predict_sequence(predictor, sample)
     print("time per frame:", elapsed_time)
-    
+
     if isinstance(pred_tracks, tuple):
         pred_trajectory, pred_visibility, _ = pred_tracks
     else:
         pred_visibility = None
     
     if pred_visibility is None:
-        pred_visibility = torch.zeros_like(sample.visibility)
+        pred_visibility = torch.zeros_like(torch.as_tensor(sample.visibility))
 
-    if not pred_visibility.dtype == torch.bool:
+    if pred_visibility.dtype != torch.bool:
         pred_visibility = pred_visibility > 0.8
         
     pred_occluded = (
@@ -193,8 +182,8 @@ for seq_name, dataset_type in EVAL_DATASETS:
             .cpu()
             .numpy()
         )
-    pred_tracks = pred_trajectory.permute(0, 2, 1, 3).cpu().numpy()
-    
+    pred_tracks_np = pred_trajectory.permute(0, 2, 1, 3).detach().cpu().numpy()
+
     query_points = np.concatenate(
         (
             np.zeros_like(sample.trajectory[:, 0, :, :1]),
@@ -205,42 +194,12 @@ for seq_name, dataset_type in EVAL_DATASETS:
     
     gt_tracks = np.transpose(sample.trajectory[:, :, :, 1:].copy(), (0, 2, 1, 3))
     gt_occluded = np.transpose(sample.visibility.copy(), (0, 2, 1))
-    
-    def expand_trajectory(traj, vis):
-        """
-        traj: numpy array of shape (B, N, T, 2)
-        return: numpy array of shape (B, N, 2*T, 2)
-        """
-        B, N, T, _ = traj.shape
-        
-        # 初始化结果
-        expanded = np.zeros((B, N, 2*T, 2), dtype=traj.dtype)
-        expanded_vis = np.zeros((B, N, 2*T), dtype=vis.dtype)
-        
-        expanded_vis[:, :, ::2] = vis
-        expanded_vis[:, :, 1::2] = vis
-        
-        # 原始帧放在偶数位置
-        expanded[:, :, ::2, :] = traj
-        
-        # 计算速度（v_t = p_t - p_{t-1}）
-        vel = np.zeros_like(traj)
-        vel[:, :, 1:, :] = traj[:, :, 1:, :] - traj[:, :, :-1, :]
-        
-        # 用上一帧速度估算插值帧位置
-        # p_{t+0.5} = p_t + 0.5 * v_t
-        expanded[:, :, 1::2, :] = traj + 0.5 * vel
-        
-        # 对 t=0 的插值帧（expanded[:, :, 1, :]），因为没有前一帧速度，保持不变
-        expanded[:, :, 1, :] = traj[:, :, 0, :]
 
-        return expanded, expanded_vis
-    
     if pred_trajectory.shape[1] != sample.trajectory.shape[1]:
         pred_trajectory_new = np.zeros_like(gt_tracks)
         pred_occluded_new = np.zeros_like(gt_occluded)
-        for i in range(pred_tracks.shape[1]):
-            pred_traj = pred_tracks[:, i, :, :]
+        for i in range(pred_tracks_np.shape[1]):
+            pred_traj = pred_tracks_np[:, i, :, :]
             gt_t = sample.trajectory[:, :, i, 0].squeeze()
             est_t = sample.segmentation * 1e-6
             pred_traj_x, pred_traj_y = pred_traj.squeeze().T
@@ -275,15 +234,15 @@ for seq_name, dataset_type in EVAL_DATASETS:
                 pred_occ[mid_indices - 1], 
                 pred_occ[mid_indices]
             )
-            
-        pred_tracks = pred_trajectory_new.copy()
+
+        pred_tracks_np = pred_trajectory_new.copy()
         pred_occluded = pred_occluded_new.copy()
     out_metrics = compute_tapvid_metrics(
         query_points,
         gt_occluded,
         gt_tracks,
         pred_occluded,
-        pred_tracks,
+        pred_tracks_np,
         query_mode="first",
     )
     out_metrics = {metric_name: _to_metric_scalar(metric_value) for metric_name, metric_value in out_metrics.items()}
@@ -314,7 +273,7 @@ for seq_name, dataset_type in EVAL_DATASETS:
         t = sample.segmentation.astype(float)
         t *= 1e-6
         t = t.reshape(1, -1, 1, 1).repeat(N, axis=2)
-        pred_trajectory_with_time = np.concatenate((ind, t, pred_trajectory.cpu().numpy()), axis=3)
+        pred_trajectory_with_time = np.concatenate((ind, t, pred_trajectory.detach().cpu().numpy()), axis=3)
         pred_trajectory_txt = np.transpose(pred_trajectory_with_time, (0, 2, 1, 3)).reshape(-1, 4)
         traj_path = os.path.join(output_dir, "pred_trajectory.txt")
         np.savetxt(traj_path, pred_trajectory_txt)

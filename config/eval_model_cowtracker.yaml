@@ -1,0 +1,11 @@
+backend: "cowtracker"
+repo_root: "../../cowtracker"
+checkpoint: "../../cowtracker/checkpoints/cowtracker/cowtracker_model.pth"
+model_config: "../../cowtracker/config/visualize_rgb_official_windowed.yaml"
+precision: "bf16"
+# Compatibility fallback only. When a real-benchmark config sets `eval_resolution`,
+# that shared resolution overrides this bridge infer_size.
+infer_size: auto
+use_padding: true
+skip_upscaling: false
+online: true
