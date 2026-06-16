@@ -1,6 +1,6 @@
 # Configuration file for Kubric/ETAP visualization with TAPFormer fusion + CoW-style dense head
 
-ckpt_root: "output/train_kubric_cow_dense/20260602_160109/best.pth"
+ckpt_root: "output/train_kubric_cow_dense/20260606_234701/best.pth"
 
 dataset:
   data_root: "data/event_kubric/test"
@@ -36,14 +36,16 @@ model:
   cow_info_update_mode: "iterative"  # direct | iterative
   cow_online_use_window_init: false
   cow_online_use_global_first_anchor: true
-  cow_online_use_memory_features: false
-  cow_online_num_memory_frames: 12
+  cow_online_use_memory_features: true
+  cow_online_num_memory_frames: 8
+  cow_window_stride: null  # null -> window_size // 2
+  cow_window_num_memory_frames: 8
   cow_frontend_type: "base"  # "base" | "frame_anchor"
   cow_anchor_state_mix: 0.7
   cow_anchor_skip_mix: 0.7
 
 predictor:
-  inference_mode: "online"  # online | offline
+  inference_mode: "online"  # online | offline | cowtracker_windowed
   input_mode: "fusion"  # fusion | frame | event
   n_iters: 5
   grid_size: 0
@@ -60,7 +62,7 @@ eval:
   max_seqs: 5
 
 visualization:
-  output_dir: "output/eval_kubric_cow_dense"
+  output_dir: "output/eval_kubric_cow_dense_v1"
   enable: true
   video_model: "events"
   use_clear_video: true
@@ -74,6 +76,6 @@ visualization:
   tracks_leave_trace: 12
   dense_debug: false
   dense_overlay_alpha: 0.5
-  online_dual_merge_export: true
+  online_dual_merge_export: false
   video_start: 0
   video_length: 0

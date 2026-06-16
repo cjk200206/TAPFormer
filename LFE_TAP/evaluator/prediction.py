@@ -339,10 +339,13 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         cow_online_use_global_first_anchor=False,
         cow_online_use_memory_features=False,
         cow_online_num_memory_frames=10,
+        cow_window_stride=None,
+        cow_window_num_memory_frames=None,
         cow_frontend_type="base",
         cow_anchor_state_mix=0.7,
         cow_anchor_skip_mix=0.7,
     ):
+        del cow_window_stride, cow_window_num_memory_frames
         if trained_model is not None:
             super().__init__(
                 window_size=trained_model.window_size,
@@ -359,7 +362,7 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 cow_refine_blocks=cow_refine_blocks,
                 cow_temporal_interleave_stride=cow_temporal_interleave_stride,
                 cow_tracking_down_ratio=cow_tracking_down_ratio,
-                cow_limit_flow=cow_limit_flow,
+                cow_limit_flow=cow_limit_flow, 
                 cow_max_flow_update_ratio=cow_max_flow_update_ratio,
                 cow_max_flow_magnitude_ratio=cow_max_flow_magnitude_ratio,
                 cow_refine_checkpoint=cow_refine_checkpoint,
@@ -707,4 +710,279 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 ),
             }
             return coords_predicted, vis_predicted, conf_predicted, merge_variants
+        return coords_predicted, vis_predicted, conf_predicted
+
+
+class TAPFormerCowDense_windowed(TAPFormerCowDense):
+    def __init__(
+        self,
+        trained_model=None,
+        window_size=16,
+        stride=4,
+        corr_radius=3,
+        corr_levels=3,
+        backbone="basic",
+        num_heads=8,
+        hidden_size=384,
+        space_depth=3,
+        time_depth=3,
+        cow_refine_model="vits",
+        cow_refine_patch_size=4,
+        cow_refine_blocks=None,
+        cow_temporal_interleave_stride=2,
+        cow_tracking_down_ratio=2,
+        cow_limit_flow=True,
+        cow_max_flow_update_ratio=0.15,
+        cow_max_flow_magnitude_ratio=1.0,
+        cow_refine_checkpoint=False,
+        cow_info_update_mode="direct",
+        cow_window_stride=None,
+        cow_window_num_memory_frames=None,
+        cow_online_use_window_init=False,
+        cow_online_use_global_first_anchor=False,
+        cow_online_use_memory_features=False,
+        cow_online_num_memory_frames=10,
+        cow_frontend_type="base",
+        cow_anchor_state_mix=0.7,
+        cow_anchor_skip_mix=0.7,
+    ):
+        del cow_online_use_window_init, cow_online_use_global_first_anchor, cow_online_use_memory_features
+
+        if trained_model is not None:
+            super().__init__(
+                window_size=trained_model.window_size,
+                stride=trained_model.stride,
+                corr_radius=corr_radius,
+                corr_levels=corr_levels,
+                backbone=backbone,
+                num_heads=num_heads,
+                hidden_size=hidden_size,
+                space_depth=space_depth,
+                time_depth=time_depth,
+                cow_refine_model=cow_refine_model,
+                cow_refine_patch_size=cow_refine_patch_size,
+                cow_refine_blocks=cow_refine_blocks,
+                cow_temporal_interleave_stride=cow_temporal_interleave_stride,
+                cow_tracking_down_ratio=cow_tracking_down_ratio,
+                cow_limit_flow=cow_limit_flow,
+                cow_max_flow_update_ratio=cow_max_flow_update_ratio,
+                cow_max_flow_magnitude_ratio=cow_max_flow_magnitude_ratio,
+                cow_refine_checkpoint=cow_refine_checkpoint,
+                cow_info_update_mode=getattr(getattr(trained_model, "dense_head", None), "info_update_mode", cow_info_update_mode),
+                cow_frontend_type=getattr(trained_model, "cow_frontend_type", cow_frontend_type),
+                cow_anchor_state_mix=cow_anchor_state_mix,
+                cow_anchor_skip_mix=cow_anchor_skip_mix,
+            )
+            self.fusion_block = trained_model.fusion_block
+            self.dense_head = trained_model.dense_head
+            self.cow_frontend_type = getattr(trained_model, "cow_frontend_type", self.cow_frontend_type)
+        else:
+            super().__init__(
+                window_size=window_size,
+                stride=stride,
+                corr_radius=corr_radius,
+                corr_levels=corr_levels,
+                backbone=backbone,
+                num_heads=num_heads,
+                hidden_size=hidden_size,
+                space_depth=space_depth,
+                time_depth=time_depth,
+                cow_refine_model=cow_refine_model,
+                cow_refine_patch_size=cow_refine_patch_size,
+                cow_refine_blocks=cow_refine_blocks,
+                cow_temporal_interleave_stride=cow_temporal_interleave_stride,
+                cow_tracking_down_ratio=cow_tracking_down_ratio,
+                cow_limit_flow=cow_limit_flow,
+                cow_max_flow_update_ratio=cow_max_flow_update_ratio,
+                cow_max_flow_magnitude_ratio=cow_max_flow_magnitude_ratio,
+                cow_refine_checkpoint=cow_refine_checkpoint,
+                cow_info_update_mode=cow_info_update_mode,
+                cow_frontend_type=cow_frontend_type,
+                cow_anchor_state_mix=cow_anchor_state_mix,
+                cow_anchor_skip_mix=cow_anchor_skip_mix,
+            )
+
+        resolved_stride = cow_window_stride
+        if resolved_stride is None:
+            resolved_stride = max(1, int(self.window_size) // 2)
+        self.cow_window_stride = int(resolved_stride)
+        if self.cow_window_stride <= 0:
+            raise ValueError("cow_window_stride must be positive")
+
+        resolved_memory = cow_window_num_memory_frames
+        if resolved_memory is None:
+            resolved_memory = cow_online_num_memory_frames
+        self.cow_window_num_memory_frames = int(resolved_memory)
+        if self.cow_window_num_memory_frames < 0:
+            raise ValueError("cow_window_num_memory_frames must be non-negative")
+
+    @staticmethod
+    def _compute_windows(total_frames: int, window_len: int, stride: int):
+        if total_frames <= window_len:
+            return [(0, total_frames)]
+
+        windows = []
+        start = 0
+        while start < total_frames:
+            end = min(start + window_len, total_frames)
+            windows.append((start, end))
+            if end == total_frames:
+                break
+            start += stride
+        return windows
+
+    @staticmethod
+    def _select_memory_frames(window_idx: int, window_start: int, num_memory_frames: int):
+        if num_memory_frames <= 0 or window_idx == 0:
+            return []
+
+        memory_indices = [0]
+        for offset in [2, 1]:
+            idx = window_start - offset
+            if idx > 0 and idx not in memory_indices:
+                memory_indices.append(idx)
+
+        if window_start > 10:
+            mid_start, mid_end = 5, window_start - 3
+            step = (mid_end - mid_start) / 6
+            for i in range(5):
+                idx = int(mid_start + (i + 1) * step)
+                if idx not in memory_indices:
+                    memory_indices.append(idx)
+
+        if len(memory_indices) > num_memory_frames:
+            memory_indices = sorted(memory_indices)[-num_memory_frames:]
+        return sorted(memory_indices)
+
+    def _gather_window_inputs(self, rgbs, events, img_ifnew, start: int, end: int, memory_indices):
+        parts_rgbs = [rgbs[:, 0:1]]
+        parts_events = [events[:, 0:1]]
+        parts_ifnew = [img_ifnew[0:1]]
+
+        if memory_indices:
+            memory_index_tensor = torch.as_tensor(memory_indices, device=rgbs.device, dtype=torch.long)
+            parts_rgbs.append(rgbs.index_select(1, memory_index_tensor))
+            parts_events.append(events.index_select(1, memory_index_tensor))
+            parts_ifnew.append(img_ifnew.index_select(0, memory_index_tensor))
+
+        parts_rgbs.append(rgbs[:, start:end])
+        parts_events.append(events[:, start:end])
+        parts_ifnew.append(img_ifnew[start:end])
+
+        return (
+            torch.cat(parts_rgbs, dim=1),
+            torch.cat(parts_events, dim=1),
+            torch.cat(parts_ifnew, dim=0),
+            len(memory_indices),
+        )
+
+    def _merge_window_predictions(self, window_idx: int, window_start: int, window_end: int, window_pred, accumulated):
+        s_actual = window_end - window_start
+        if window_idx > 0 and self.cow_window_stride < self.window_size:
+            overlap_len = min(self.window_size - self.cow_window_stride, s_actual)
+            if overlap_len < s_actual:
+                start_offset = overlap_len
+                accumulated[:, window_start + start_offset : window_end] = window_pred[:, start_offset:s_actual]
+            return
+        accumulated[:, window_start:window_end] = window_pred[:, :s_actual]
+
+    @torch.no_grad()
+    def forward(
+        self,
+        rgbs,
+        events,
+        queries,
+        iters=4,
+        img_ifnew=None,
+        feat_init=None,
+        interp_shape=(384, 512),
+        is_train=False,
+        return_merge_variants=False,
+    ):
+        del feat_init, is_train
+        if return_merge_variants:
+            raise ValueError(
+                "TAPFormerCowDense_windowed does not support return_merge_variants. "
+                "Use TAPFormerCowDense_online for dual merge exports."
+            )
+
+        device = queries.device
+        if not isinstance(rgbs, torch.Tensor):
+            rgbs = torch.as_tensor(np.asarray(rgbs), device=device)
+        if not isinstance(events, torch.Tensor):
+            events = torch.as_tensor(np.asarray(events), device=device)
+        if not torch.is_floating_point(rgbs):
+            rgbs = rgbs.float()
+        if not torch.is_floating_point(events):
+            events = events.float()
+
+        B, T, C_event, H, W = events.shape
+        _, N, _ = queries.shape
+        _, _, C_img, _, _ = rgbs.shape
+        if B != 1:
+            raise AssertionError("TAPFormerCowDense_windowed expects batch_size == 1")
+
+        queries = queries.clone()
+        rgbs_flat = rgbs.reshape(B * T, C_img, H, W)
+        events_flat = events.reshape(B * T, C_event, H, W)
+        rgbs_flat = F.interpolate(rgbs_flat, tuple(interp_shape), mode="bilinear", align_corners=True)
+        events_flat = F.interpolate(events_flat, tuple(interp_shape), mode="bilinear", align_corners=True)
+        rgbs = rgbs_flat.reshape(B, T, C_img, interp_shape[0], interp_shape[1])
+        events = events_flat.reshape(B, T, C_event, interp_shape[0], interp_shape[1])
+
+        queries[:, :, 1] *= (interp_shape[1] - 1) / (W - 1)
+        queries[:, :, 2] *= (interp_shape[0] - 1) / (H - 1)
+        query_xy = self._prepare_query_xy(queries)
+
+        if img_ifnew is None:
+            img_ifnew = torch.ones(T, device=rgbs.device, dtype=rgbs.dtype)
+        elif isinstance(img_ifnew, torch.Tensor):
+            img_ifnew = img_ifnew.to(device=rgbs.device, dtype=rgbs.dtype)
+        else:
+            img_ifnew = torch.as_tensor(np.asarray(img_ifnew), device=rgbs.device).to(dtype=rgbs.dtype)
+
+        coords_predicted = torch.zeros((B, T, N, 2), device=device, dtype=queries.dtype)
+        vis_predicted = torch.zeros((B, T, N), device=device, dtype=queries.dtype)
+        conf_predicted = torch.zeros((B, T, N), device=device, dtype=queries.dtype)
+
+        windows = self._compute_windows(T, int(self.window_size), int(self.cow_window_stride))
+        for window_idx, (start, end) in enumerate(windows):
+            memory_indices = self._select_memory_frames(window_idx, start, self.cow_window_num_memory_frames)
+            window_rgbs, window_events, window_img_ifnew, num_memory = self._gather_window_inputs(
+                rgbs,
+                events,
+                img_ifnew,
+                start,
+                end,
+                memory_indices,
+            )
+            gathered_features = self._encode_window_features(
+                window_rgbs,
+                window_events,
+                img_ifnew=window_img_ifnew,
+                reset_state=True,
+            )
+            first_frame_features = gathered_features[:, 0:1].clone()
+            tracked_features = gathered_features[:, 1:]
+
+            traj, vis, conf, _, _, _, _ = self._forward_window(
+                tracked_features,
+                query_xy,
+                image_size=interp_shape,
+                iters=int(iters),
+                first_frame_features=first_frame_features,
+            )
+            if num_memory > 0:
+                traj = traj[:, num_memory:]
+                vis = vis[:, num_memory:]
+                conf = conf[:, num_memory:]
+
+            traj_window = traj[:, : end - start].clone()
+            vis_window = vis[:, : end - start].clone()
+            conf_window = conf[:, : end - start].clone()
+
+            self._merge_window_predictions(window_idx, start, end, traj_window, coords_predicted)
+            self._merge_window_predictions(window_idx, start, end, vis_window, vis_predicted)
+            self._merge_window_predictions(window_idx, start, end, conf_window, conf_predicted)
+
         return coords_predicted, vis_predicted, conf_predicted

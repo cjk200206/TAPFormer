@@ -7,7 +7,7 @@ Usage:
 
 import argparse
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import sys
 from pathlib import Path
 
@@ -22,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from LFE_TAP.datasets.kubric_movif_dataset import KubricMovifDataset_etap
 from LFE_TAP.evaluator.evaluation_pred import EvaluationPredictor
-from LFE_TAP.evaluator.prediction import TAPFormerCowDense_online, TAPFormer_online
+from LFE_TAP.evaluator.prediction import TAPFormerCowDense_online, TAPFormerCowDense_windowed, TAPFormer_online
 from LFE_TAP.models.tapformer import TAPFormer
 from LFE_TAP.models.tapformer_cow_dense import TAPFormerCowDense
 from LFE_TAP.utils.model_utils import get_points_on_a_grid
@@ -206,6 +206,8 @@ def build_model_from_config(model_cfg, inference_mode="online"):
             cow_online_use_global_first_anchor=bool(model_cfg.get("cow_online_use_global_first_anchor", False)),
             cow_online_use_memory_features=bool(model_cfg.get("cow_online_use_memory_features", False)),
             cow_online_num_memory_frames=int(model_cfg.get("cow_online_num_memory_frames", 10)),
+            cow_window_stride=model_cfg.get("cow_window_stride", None),
+            cow_window_num_memory_frames=model_cfg.get("cow_window_num_memory_frames", None),
             cow_frontend_type=str(model_cfg.get("cow_frontend_type", "base")),
             cow_anchor_state_mix=float(model_cfg.get("cow_anchor_state_mix", 0.7)),
             cow_anchor_skip_mix=float(model_cfg.get("cow_anchor_skip_mix", 0.7)),
@@ -213,6 +215,8 @@ def build_model_from_config(model_cfg, inference_mode="online"):
         )
         if inference_mode == "offline":
             return TAPFormerCowDense(**cow_kwargs)
+        if inference_mode == "cowtracker_windowed":
+            return TAPFormerCowDense_windowed(**cow_kwargs)
         return TAPFormerCowDense_online(**cow_kwargs)
     if inference_mode == "offline":
         return TAPFormer(**common_kwargs)
@@ -229,8 +233,11 @@ def main():
     vis_cfg = cfg.get("visualization", {})
     eval_cfg = cfg.get("eval", {})
     inference_mode = str(pred_cfg.get("inference_mode", "online")).lower().strip()
-    if inference_mode not in {"online", "offline"}:
-        raise ValueError(f"Unsupported predictor.inference_mode={inference_mode}. Use online or offline.")
+    if inference_mode not in {"online", "offline", "cowtracker_windowed"}:
+        raise ValueError(
+            f"Unsupported predictor.inference_mode={inference_mode}. "
+            "Use online, offline, or cowtracker_windowed."
+        )
 
     data_root = dataset_cfg["data_root"]
     ckpt_root = cfg["ckpt_root"]

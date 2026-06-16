@@ -114,6 +114,7 @@ save_results = output_cfg.get('save_results', False)
 save_trajectory = output_cfg.get('save_trajectory', False)
 base_output_dir = output_cfg.get('base_dir', 'output/eval_InivTAP_DrivTAP_subseq')
 input_mode = config.get('input_mode', 'fusion')
+inference_mode = str(config.get('inference_mode', 'online')).lower().strip()
 eval_backend = str(config.get('eval_model', {}).get('backend', 'tapformer_family')).lower().strip()
 
 # ========== Predictor Initialization ==========
@@ -130,6 +131,7 @@ predictor = build_eval_predictor_from_config(
 print("Predictor loaded successfully!")
 print(f"Predictor backend: {eval_backend}")
 print(f"Input mode: {input_mode}")
+print(f"Inference mode: {inference_mode}")
 
 # ========== Evaluation ==========
 print("\n" + "="*50)

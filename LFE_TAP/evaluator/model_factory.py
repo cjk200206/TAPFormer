@@ -6,7 +6,7 @@ import torch
 import yaml
 
 from LFE_TAP.evaluator.evaluation_pred import CowTrackerEvaluationPredictor, EvaluationPredictor
-from LFE_TAP.evaluator.prediction import TAPFormerCowDense_online, TAPFormer_online
+from LFE_TAP.evaluator.prediction import TAPFormerCowDense_online, TAPFormerCowDense_windowed, TAPFormer_online
 
 
 _TAPFORMER_MODEL_NAMES = {"tapformer", "tapformer_online"}
@@ -50,6 +50,8 @@ def _get_cow_model_kwargs(model_cfg):
         "cow_online_use_global_first_anchor": bool(model_cfg.get("cow_online_use_global_first_anchor", False)),
         "cow_online_use_memory_features": bool(model_cfg.get("cow_online_use_memory_features", False)),
         "cow_online_num_memory_frames": int(model_cfg.get("cow_online_num_memory_frames", 10)),
+        "cow_window_stride": model_cfg.get("cow_window_stride", None),
+        "cow_window_num_memory_frames": model_cfg.get("cow_window_num_memory_frames", None),
         "cow_frontend_type": str(model_cfg.get("cow_frontend_type", "base")),
         "cow_anchor_state_mix": float(model_cfg.get("cow_anchor_state_mix", 0.7)),
         "cow_anchor_skip_mix": float(model_cfg.get("cow_anchor_skip_mix", 0.7)),
@@ -172,6 +174,16 @@ def _get_eval_resolution(eval_cfg):
     return tuple(int(v) for v in eval_resolution)
 
 
+def _get_eval_inference_mode(eval_cfg):
+    inference_mode = str(eval_cfg.get("inference_mode", "online")).lower().strip()
+    if inference_mode not in {"online", "cowtracker_windowed"}:
+        raise ValueError(
+            f"Unsupported inference_mode={inference_mode}. "
+            "Use one of: online, cowtracker_windowed."
+        )
+    return inference_mode
+
+
 def _load_tapformer_checkpoint(eval_cfg, device):
     ckpt_root = _resolve_path(eval_cfg["ckpt_root"], _get_config_base_dir(eval_cfg))
     state_dict = torch.load(str(ckpt_root), map_location=device)
@@ -181,8 +193,12 @@ def _load_tapformer_checkpoint(eval_cfg, device):
 
 
 def build_eval_model_from_config(model_cfg, inference_mode="online"):
-    if str(inference_mode).lower().strip() != "online":
-        raise ValueError("Only online inference_mode is supported for real-dataset evaluation.")
+    inference_mode = str(inference_mode).lower().strip()
+    if inference_mode not in {"online", "cowtracker_windowed"}:
+        raise ValueError(
+            f"Unsupported inference_mode={inference_mode}. "
+            "Use one of: online, cowtracker_windowed."
+        )
 
     model_name = str(
         model_cfg.get("model_name", model_cfg.get("name", "tapformer_online"))
@@ -190,11 +206,17 @@ def build_eval_model_from_config(model_cfg, inference_mode="online"):
     common_kwargs = _get_common_model_kwargs(model_cfg)
 
     if model_name in _TAPFORMER_MODEL_NAMES:
+        if inference_mode != "online":
+            raise ValueError(
+                "inference_mode=cowtracker_windowed only supports tapformer_cow_dense / cow_dense."
+            )
         return TAPFormer_online(**common_kwargs)
 
     if model_name in _COW_DENSE_MODEL_NAMES:
         cow_kwargs = _get_cow_model_kwargs(model_cfg)
         cow_kwargs.update(common_kwargs)
+        if inference_mode == "cowtracker_windowed":
+            return TAPFormerCowDense_windowed(**cow_kwargs)
         return TAPFormerCowDense_online(**cow_kwargs)
 
     raise ValueError(
@@ -205,7 +227,7 @@ def build_eval_model_from_config(model_cfg, inference_mode="online"):
 
 def _build_tapformer_predictor(eval_cfg, predictor_kwargs):
     device = _resolve_device(eval_cfg.get("device"))
-    model = build_eval_model_from_config(eval_cfg, inference_mode="online")
+    model = build_eval_model_from_config(eval_cfg, inference_mode=_get_eval_inference_mode(eval_cfg))
     state_dict = _load_tapformer_checkpoint(eval_cfg, device)
     model.load_state_dict(state_dict, strict=False)
     model = model.to(device)

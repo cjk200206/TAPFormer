@@ -49,6 +49,8 @@ cow_online_use_window_init: false
 cow_online_use_global_first_anchor: true
 cow_online_use_memory_features: false
 cow_online_num_memory_frames: 12
+cow_window_stride: null
+cow_window_num_memory_frames: 12
 cow_frontend_type: "base"
 cow_anchor_state_mix: 0.7
 cow_anchor_skip_mix: 0.7
@@ -56,6 +58,8 @@ eval_resolution: [448, 560]
 
 eval_model:
   backend: "tapformer_family"
+
+inference_mode: "online"  # online | cowtracker_windowed
 
 # Evaluation settings
 grid_size: 0
