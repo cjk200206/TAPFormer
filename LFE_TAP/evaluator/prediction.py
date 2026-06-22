@@ -821,70 +821,64 @@ class TAPFormerCowDense_windowed(TAPFormerCowDense):
         if total_frames <= window_len:
             return [(0, total_frames)]
 
-        windows = []
-        start = 0
-        while start < total_frames:
-            end = min(start + window_len, total_frames)
-            windows.append((start, end))
-            if end == total_frames:
-                break
-            start += stride
-        return windows
+        last_start = total_frames - window_len
+        starts = list(range(0, last_start + 1, stride))
+        if starts[-1] != last_start:
+            starts.append(last_start)
+        return [(start, start + window_len) for start in starts]
 
     @staticmethod
     def _select_memory_frames(window_idx: int, window_start: int, num_memory_frames: int):
         if num_memory_frames <= 0 or window_idx == 0:
             return []
 
-        memory_indices = [0]
-        for offset in [2, 1]:
-            idx = window_start - offset
-            if idx > 0 and idx not in memory_indices:
-                memory_indices.append(idx)
+        recent_window_span = 4
+        recent_start = max(0, window_start - recent_window_span)
+        recent_indices = list(range(recent_start, window_start))
+        if len(recent_indices) > num_memory_frames:
+            return recent_indices[:num_memory_frames]
 
-        if window_start > 10:
-            mid_start, mid_end = 5, window_start - 3
-            step = (mid_end - mid_start) / 6
-            for i in range(5):
-                idx = int(mid_start + (i + 1) * step)
-                if idx not in memory_indices:
-                    memory_indices.append(idx)
+        recent_set = set(recent_indices)
+        remaining = num_memory_frames - len(recent_indices)
+        long_term_candidates = [
+            idx for idx in range(0, recent_start, recent_window_span) if idx not in recent_set
+        ]
+        if remaining > 0 and long_term_candidates:
+            long_term_indices = long_term_candidates[-remaining:]
+        else:
+            long_term_indices = []
 
-        if len(memory_indices) > num_memory_frames:
-            memory_indices = sorted(memory_indices)[-num_memory_frames:]
-        return sorted(memory_indices)
+        return long_term_indices + recent_indices
 
-    def _gather_window_inputs(self, rgbs, events, img_ifnew, start: int, end: int, memory_indices):
-        parts_rgbs = [rgbs[:, 0:1]]
-        parts_events = [events[:, 0:1]]
-        parts_ifnew = [img_ifnew[0:1]]
+    @staticmethod
+    def _find_aligned_start(window_start: int, img_ifnew):
+        aligned_start = int(window_start)
+        while aligned_start > 0:
+            value = img_ifnew[aligned_start]
+            if isinstance(value, torch.Tensor):
+                value = value.item()
+            if float(value) == 1.0:
+                break
+            aligned_start -= 1
+        return aligned_start
 
-        if memory_indices:
-            memory_index_tensor = torch.as_tensor(memory_indices, device=rgbs.device, dtype=torch.long)
-            parts_rgbs.append(rgbs.index_select(1, memory_index_tensor))
-            parts_events.append(events.index_select(1, memory_index_tensor))
-            parts_ifnew.append(img_ifnew.index_select(0, memory_index_tensor))
+    def _gather_window_inputs(self, rgbs, events, img_ifnew, sequence_start: int, end: int):
+        packed_indices = list(range(sequence_start, end))
+        target_len = end - sequence_start
+        if target_len < self.window_size:
+            packed_indices.extend([end - 1] * (self.window_size - target_len))
 
-        parts_rgbs.append(rgbs[:, start:end])
-        parts_events.append(events[:, start:end])
-        parts_ifnew.append(img_ifnew[start:end])
-
+        index = torch.as_tensor(packed_indices, device=rgbs.device, dtype=torch.long)
         return (
-            torch.cat(parts_rgbs, dim=1),
-            torch.cat(parts_events, dim=1),
-            torch.cat(parts_ifnew, dim=0),
-            len(memory_indices),
+            rgbs.index_select(1, index),
+            events.index_select(1, index),
+            img_ifnew.index_select(0, index),
         )
 
-    def _merge_window_predictions(self, window_idx: int, window_start: int, window_end: int, window_pred, accumulated):
-        s_actual = window_end - window_start
-        if window_idx > 0 and self.cow_window_stride < self.window_size:
-            overlap_len = min(self.window_size - self.cow_window_stride, s_actual)
-            if overlap_len < s_actual:
-                start_offset = overlap_len
-                accumulated[:, window_start + start_offset : window_end] = window_pred[:, start_offset:s_actual]
-            return
-        accumulated[:, window_start:window_end] = window_pred[:, :s_actual]
+    @staticmethod
+    def _merge_window_predictions(window_start: int, window_end: int, previous_end: int, window_pred, accumulated):
+        overlap = max(0, previous_end - window_start)
+        accumulated[:, window_start + overlap : window_end] = window_pred[:, overlap : window_end - window_start]
 
     @torch.no_grad()
     def forward(
@@ -945,44 +939,71 @@ class TAPFormerCowDense_windowed(TAPFormerCowDense):
         vis_predicted = torch.zeros((B, T, N), device=device, dtype=queries.dtype)
         conf_predicted = torch.zeros((B, T, N), device=device, dtype=queries.dtype)
 
+        first_frame_features = self._encode_window_features(
+            rgbs[:, :1],
+            events[:, :1],
+            img_ifnew=img_ifnew[:1],
+            reset_state=True,
+        )
         windows = self._compute_windows(T, int(self.window_size), int(self.cow_window_stride))
+        previous_end = 0
         for window_idx, (start, end) in enumerate(windows):
             memory_indices = self._select_memory_frames(window_idx, start, self.cow_window_num_memory_frames)
-            window_rgbs, window_events, window_img_ifnew, num_memory = self._gather_window_inputs(
+            aligned_start = self._find_aligned_start(start, img_ifnew)
+            long_term_indices = []
+            for idx in memory_indices:
+                if idx >= aligned_start:
+                    continue
+                value = img_ifnew[idx]
+                if isinstance(value, torch.Tensor):
+                    value = value.item()
+                if float(value) == 1.0:
+                    long_term_indices.append(idx)
+
+            long_term_features = []
+            for idx in long_term_indices:
+                long_term_features.append(
+                    self._encode_window_features(
+                        rgbs[:, idx : idx + 1],
+                        events[:, idx : idx + 1],
+                        img_ifnew=img_ifnew[idx : idx + 1],
+                        reset_state=True,
+                    )
+                )
+
+            window_rgbs, window_events, window_img_ifnew = self._gather_window_inputs(
                 rgbs,
                 events,
                 img_ifnew,
-                start,
+                aligned_start,
                 end,
-                memory_indices,
             )
-            gathered_features = self._encode_window_features(
+            short_and_current_features = self._encode_window_features(
                 window_rgbs,
                 window_events,
                 img_ifnew=window_img_ifnew,
                 reset_state=True,
             )
-            first_frame_features = gathered_features[:, 0:1].clone()
-            tracked_features = gathered_features[:, 1:]
+            if long_term_features:
+                gathered_features = torch.cat(long_term_features + [short_and_current_features], dim=1)
+            else:
+                gathered_features = short_and_current_features
 
             traj, vis, conf, _, _, _, _ = self._forward_window(
-                tracked_features,
+                gathered_features,
                 query_xy,
                 image_size=interp_shape,
                 iters=int(iters),
                 first_frame_features=first_frame_features,
             )
-            if num_memory > 0:
-                traj = traj[:, num_memory:]
-                vis = vis[:, num_memory:]
-                conf = conf[:, num_memory:]
+            prefix_len = len(long_term_indices) + (start - aligned_start)
+            traj_window = traj[:, prefix_len : prefix_len + end - start].clone()
+            vis_window = vis[:, prefix_len : prefix_len + end - start].clone()
+            conf_window = conf[:, prefix_len : prefix_len + end - start].clone()
 
-            traj_window = traj[:, : end - start].clone()
-            vis_window = vis[:, : end - start].clone()
-            conf_window = conf[:, : end - start].clone()
-
-            self._merge_window_predictions(window_idx, start, end, traj_window, coords_predicted)
-            self._merge_window_predictions(window_idx, start, end, vis_window, vis_predicted)
-            self._merge_window_predictions(window_idx, start, end, conf_window, conf_predicted)
+            self._merge_window_predictions(start, end, previous_end, traj_window, coords_predicted)
+            self._merge_window_predictions(start, end, previous_end, vis_window, vis_predicted)
+            self._merge_window_predictions(start, end, previous_end, conf_window, conf_predicted)
+            previous_end = max(previous_end, end)
 
         return coords_predicted, vis_predicted, conf_predicted

@@ -812,6 +812,10 @@ class KubricMovifDataset_etap(FETAPDataset):
         if_test=False,
         resample_max_tries=8,
         global_first_train_prob=0.0,
+        packed_window_train=False,
+        num_first_frames=0,
+        num_memory_frames=0,
+        num_current_frames=0,
     ):
         super(KubricMovifDataset_etap, self).__init__(
             root_dir=root_dir,
@@ -834,6 +838,25 @@ class KubricMovifDataset_etap(FETAPDataset):
         self.if_test = if_test
         self.resample_max_tries = max(1, int(resample_max_tries))
         self.global_first_train_prob = float(global_first_train_prob)
+        self.packed_window_train = bool(packed_window_train)
+        self.num_first_frames = int(num_first_frames)
+        self.num_memory_frames = int(num_memory_frames)
+        self.num_current_frames = int(num_current_frames)
+        if self.packed_window_train:
+            frame_budget = self.num_first_frames + self.num_memory_frames + self.num_current_frames
+            if frame_budget != self.seq_len:
+                raise ValueError(
+                    'Packed window training requires '
+                    'dataset.num_first_frames + dataset.num_memory_frames + dataset.num_current_frames == dataset.seq_len.'
+                )
+            if self.num_first_frames <= 0:
+                raise ValueError('dataset.num_first_frames must be positive when packed_window_train=true.')
+            if self.num_current_frames <= 0:
+                raise ValueError('dataset.num_current_frames must be positive when packed_window_train=true.')
+            if self.global_first_train_prob <= 0.0:
+                raise ValueError('dataset.global_first_train_prob must be > 0 when packed_window_train=true.')
+            if self.if_test:
+                raise ValueError('packed_window_train only supports training samples (dataset.if_test=false).')
         self.seq_names = [
             os.path.join(self.root_dir, fname)
             for fname in os.listdir(self.root_dir)
@@ -854,6 +877,60 @@ class KubricMovifDataset_etap(FETAPDataset):
         annot_dict = np.load(npy_path, allow_pickle=True).item()
         return rgb_dir_path, event_dir_path, rgb_files, clear_rgb_files, event_files, annot_dict
 
+    def _train_total_frames(self, rgb_files_all, clear_rgb_files_all, event_files_all, annot_dict):
+        target_points = annot_dict["target_points"]
+        if target_points.ndim >= 2:
+            annot_frames = int(target_points.shape[1])
+        else:
+            annot_frames = len(rgb_files_all)
+        return min(len(rgb_files_all), len(clear_rgb_files_all), len(event_files_all), annot_frames)
+
+    def _select_packed_memory_indices(self, current_start: int):
+        if self.num_memory_frames <= 0:
+            return []
+
+        history_start = max(0, self.num_first_frames)
+        memory_indices = []
+        for offset in [2, 1]:
+            idx = current_start - offset
+            if idx >= history_start and idx not in memory_indices:
+                memory_indices.append(idx)
+
+        older_end = max(history_start, current_start - 2)
+        older_candidates = [idx for idx in range(history_start, older_end) if idx not in memory_indices]
+        remaining = self.num_memory_frames - len(memory_indices)
+        if remaining > 0 and older_candidates:
+            if remaining >= len(older_candidates):
+                extra_indices = older_candidates
+            else:
+                sample_positions = np.linspace(0, len(older_candidates) - 1, num=remaining, dtype=int)
+                extra_indices = [older_candidates[pos] for pos in sample_positions]
+            for idx in extra_indices:
+                if idx not in memory_indices:
+                    memory_indices.append(idx)
+
+        if len(memory_indices) > self.num_memory_frames:
+            memory_indices = sorted(memory_indices)[-self.num_memory_frames :]
+        return sorted(memory_indices)
+
+    def _build_packed_frame_indices(self, current_start: int, total_frames: int):
+        if self.num_current_frames <= 0:
+            raise ValueError('dataset.num_current_frames must be positive for packed window training.')
+        current_end = current_start + self.num_current_frames
+        if current_end > total_frames:
+            raise ValueError('Packed current window exceeds sequence length.')
+
+        first_indices = list(range(min(self.num_first_frames, total_frames)))
+        memory_indices = self._select_packed_memory_indices(current_start)
+        if len(memory_indices) < self.num_memory_frames:
+            pad_value = first_indices[-1] if first_indices else max(0, current_start - 1)
+            memory_indices = [pad_value] * (self.num_memory_frames - len(memory_indices)) + memory_indices
+
+        frame_indices = first_indices + memory_indices + list(range(current_start, current_end))
+        if len(frame_indices) != self.seq_len:
+            raise ValueError('Packed window frame allocation must match dataset.seq_len exactly.')
+        return frame_indices
+
     def _build_sample_from_window(
         self,
         seq_name,
@@ -865,6 +942,8 @@ class KubricMovifDataset_etap(FETAPDataset):
         annot_dict,
         random_id=None,
         use_global_first=False,
+        frame_indices=None,
+        current_start=None,
     ):
         gotit = True
         rgb_imgs = []
@@ -872,9 +951,14 @@ class KubricMovifDataset_etap(FETAPDataset):
         clear_rgb_imgs = []
         event_imgs = []
         if not self.if_test:
-            rgb_files = rgb_files_all[random_id: random_id + self.seq_len]
-            event_files = event_files_all[random_id: random_id + self.seq_len]
-            clear_rgb_files = clear_rgb_files_all[random_id: random_id + self.seq_len]
+            if frame_indices is not None:
+                rgb_files = [rgb_files_all[idx] for idx in frame_indices]
+                event_files = [event_files_all[idx] for idx in frame_indices]
+                clear_rgb_files = [clear_rgb_files_all[idx] for idx in frame_indices]
+            else:
+                rgb_files = rgb_files_all[random_id: random_id + self.seq_len]
+                event_files = event_files_all[random_id: random_id + self.seq_len]
+                clear_rgb_files = clear_rgb_files_all[random_id: random_id + self.seq_len]
         else:
             rgb_files = rgb_files_all[:-1]
             event_files = event_files_all
@@ -939,8 +1023,12 @@ class KubricMovifDataset_etap(FETAPDataset):
         clear_rgbs = np.stack(clear_rgb_imgs)
         events = np.stack(event_imgs)
         if not self.if_test:
-            traj_2d = annot_dict["target_points"][:, random_id: random_id + self.seq_len]
-            visibility = annot_dict["occluded"][:, random_id: random_id + self.seq_len]
+            if frame_indices is not None:
+                traj_2d = annot_dict["target_points"][:, frame_indices]
+                visibility = annot_dict["occluded"][:, frame_indices]
+            else:
+                traj_2d = annot_dict["target_points"][:, random_id: random_id + self.seq_len]
+                visibility = annot_dict["occluded"][:, random_id: random_id + self.seq_len]
             if use_global_first:
                 reference_points = annot_dict["target_points"][:, 0].copy()
                 reference_visibility = np.logical_not(annot_dict["occluded"][:, 0].copy())
@@ -1032,6 +1120,8 @@ class KubricMovifDataset_etap(FETAPDataset):
         trajs = traj_2d[:, visible_inds_sampled].float()
         visibles = visibility[:, visible_inds_sampled]
         valid = torch.ones((self.seq_len, self.traj_per_sample))
+        if frame_indices is not None and current_start is not None and self.packed_window_train:
+            valid[: self.num_first_frames + self.num_memory_frames] = 0.0
 
         if use_global_first:
             query_xy = reference_points[visible_inds_sampled].float()
@@ -1084,28 +1174,55 @@ class KubricMovifDataset_etap(FETAPDataset):
             )
             return sample, gotit
 
-        max_start = 95 - self.seq_len
+        total_frames = self._train_total_frames(rgb_files, clear_rgb_files, event_files, annot_dict)
+        max_contiguous_start = max(0, total_frames - self.seq_len)
+        max_current_start = max(0, total_frames - self.num_current_frames)
         last_candidate_count = 0
         last_random_id = None
         for _ in range(self.resample_max_tries):
-            random_id = np.random.randint(0, max_start)
             use_global_first = (
                 self.global_first_train_prob > 0.0
                 and not self.use_augs
-                and random_id > 0
                 and np.random.rand() < self.global_first_train_prob
             )
-            sample, gotit, candidate_count, sampled_random_id = self._build_sample_from_window(
-                seq_name,
-                rgb_dir_path,
-                event_dir_path,
-                rgb_files,
-                clear_rgb_files,
-                event_files,
-                annot_dict,
-                random_id=random_id,
-                use_global_first=use_global_first,
-            )
+            if self.packed_window_train and use_global_first:
+                min_current_start = max(1, self.num_first_frames + self.num_memory_frames)
+                if max_current_start <= 0:
+                    current_start = 0
+                elif min_current_start <= max_current_start:
+                    current_start = np.random.randint(min_current_start, max_current_start + 1)
+                else:
+                    current_start = max(1, max_current_start)
+                frame_indices = self._build_packed_frame_indices(current_start, total_frames)
+                sample, gotit, candidate_count, sampled_random_id = self._build_sample_from_window(
+                    seq_name,
+                    rgb_dir_path,
+                    event_dir_path,
+                    rgb_files,
+                    clear_rgb_files,
+                    event_files,
+                    annot_dict,
+                    random_id=current_start,
+                    use_global_first=True,
+                    frame_indices=frame_indices,
+                    current_start=current_start,
+                )
+            else:
+                if max_contiguous_start <= 0:
+                    random_id = 0
+                else:
+                    random_id = np.random.randint(0, max_contiguous_start + 1)
+                sample, gotit, candidate_count, sampled_random_id = self._build_sample_from_window(
+                    seq_name,
+                    rgb_dir_path,
+                    event_dir_path,
+                    rgb_files,
+                    clear_rgb_files,
+                    event_files,
+                    annot_dict,
+                    random_id=random_id,
+                    use_global_first=use_global_first,
+                )
             if gotit:
                 return sample, True
             last_candidate_count = candidate_count

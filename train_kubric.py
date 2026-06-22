@@ -272,6 +272,10 @@ def main():
         if_test=bool(dataset_cfg.get("if_test", False)),
         resample_max_tries=int(dataset_cfg.get("resample_max_tries", 8)),
         global_first_train_prob=global_first_train_prob,
+        packed_window_train=bool(dataset_cfg.get("packed_window_train", False)),
+        num_first_frames=int(dataset_cfg.get("num_first_frames", 0)),
+        num_memory_frames=int(dataset_cfg.get("num_memory_frames", 0)),
+        num_current_frames=int(dataset_cfg.get("num_current_frames", 0)),
     )
 
     loader = DataLoader(
