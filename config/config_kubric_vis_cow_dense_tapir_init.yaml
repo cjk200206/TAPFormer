@@ -1,6 +1,5 @@
-# Visualization config for 8-frame cow-dense windowed inference
-
-ckpt_root: "output/train_kubric_cow_dense/20260701_000352/best.pth"
+# Replace RUN_TIMESTAMP after fine-tuning finishes.
+ckpt_root: "output/train_kubric_cow_dense_tapir_init/20260630_234623/best.pth"
 
 dataset:
   data_root: "data/event_kubric/test"
@@ -33,20 +32,25 @@ model:
   cow_max_flow_update_ratio: 0.15
   cow_max_flow_magnitude_ratio: 1.0
   cow_refine_checkpoint: true
-  cow_info_update_mode: "iterative"  # direct | iterative
-  cow_online_use_window_init: true
+  cow_info_update_mode: "iterative"
+  cow_tapir_init: true
+  cow_tapir_init_stride: 16
+  cow_tapir_init_temperature: 20.0
+  cow_tapir_init_radius: 5
+  cow_tapir_init_chunk_size: 64
+  cow_online_use_window_init: false
   cow_online_use_global_first_anchor: false
   cow_online_use_memory_features: false
   cow_online_num_memory_frames: 3
   cow_window_stride: 4
-  cow_window_num_memory_frames: 0
-  cow_frontend_type: "base"  # "base" | "frame_anchor"
+  cow_window_num_memory_frames: 3
+  cow_frontend_type: "base"
   cow_anchor_state_mix: 0.7
   cow_anchor_skip_mix: 0.7
 
 predictor:
-  inference_mode: "cowtracker_windowed"  # online | offline | cowtracker_windowed
-  input_mode: "fusion"  # fusion | frame | event
+  inference_mode: "cowtracker_windowed"
+  input_mode: "fusion"
   n_iters: 5
   grid_size: 0
   local_grid_size: 0
@@ -62,12 +66,12 @@ eval:
   max_seqs: 5
 
 visualization:
-  output_dir: "output/eval_kubric_cow_dense_window8"
+  output_dir: "output/eval_kubric_cow_dense_tapir_init"
   enable: true
   video_model: "events"
   use_clear_video: true
   use_gt_as_prediction: false
-  query_mode: "grid"  # gt | grid
+  query_mode: "grid"
   grid_size: 32
   visibility_threshold: 0.8
   fps: 20

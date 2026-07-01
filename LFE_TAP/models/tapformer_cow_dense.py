@@ -32,6 +32,11 @@ class TAPFormerCowDense(nn.Module):
         cow_max_flow_magnitude_ratio=1.0,
         cow_refine_checkpoint=False,
         cow_info_update_mode="direct",
+        cow_tapir_init=False,
+        cow_tapir_init_stride=16,
+        cow_tapir_init_temperature=20.0,
+        cow_tapir_init_radius=5,
+        cow_tapir_init_chunk_size=64,
         cow_frontend_type="base",
         cow_anchor_state_mix=0.7,
         cow_anchor_skip_mix=0.7,
@@ -75,6 +80,11 @@ class TAPFormerCowDense(nn.Module):
             max_flow_magnitude_ratio=float(cow_max_flow_magnitude_ratio),
             refine_checkpoint=bool(cow_refine_checkpoint),
             info_update_mode=cow_info_update_mode,
+            tapir_init=bool(cow_tapir_init),
+            tapir_init_stride=int(cow_tapir_init_stride),
+            tapir_init_temperature=float(cow_tapir_init_temperature),
+            tapir_init_radius=int(cow_tapir_init_radius),
+            tapir_init_chunk_size=int(cow_tapir_init_chunk_size),
         )
 
     def _validate_inputs(self, rgbs, events, queries, iters):
@@ -169,6 +179,7 @@ class TAPFormerCowDense(nn.Module):
         init_track: torch.Tensor | None = None,
         init_vis: torch.Tensor | None = None,
         init_conf: torch.Tensor | None = None,
+        init_valid_mask: torch.Tensor | None = None,
         first_frame_features: torch.Tensor | None = None,
         return_debug: bool = False,
     ):
@@ -180,6 +191,7 @@ class TAPFormerCowDense(nn.Module):
             init_track=init_track,
             init_vis=init_vis,
             init_conf=init_conf,
+            init_valid_mask=init_valid_mask,
             first_frame_features=first_frame_features,
             return_debug=return_debug,
         )

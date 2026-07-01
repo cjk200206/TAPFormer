@@ -335,6 +335,11 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         cow_max_flow_magnitude_ratio=1.0,
         cow_refine_checkpoint=False,
         cow_info_update_mode="direct",
+        cow_tapir_init=False,
+        cow_tapir_init_stride=16,
+        cow_tapir_init_temperature=20.0,
+        cow_tapir_init_radius=5,
+        cow_tapir_init_chunk_size=64,
         cow_online_use_window_init=False,
         cow_online_use_global_first_anchor=False,
         cow_online_use_memory_features=False,
@@ -395,6 +400,11 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 cow_max_flow_magnitude_ratio=cow_max_flow_magnitude_ratio,
                 cow_refine_checkpoint=cow_refine_checkpoint,
                 cow_info_update_mode=cow_info_update_mode,
+                cow_tapir_init=cow_tapir_init,
+                cow_tapir_init_stride=cow_tapir_init_stride,
+                cow_tapir_init_temperature=cow_tapir_init_temperature,
+                cow_tapir_init_radius=cow_tapir_init_radius,
+                cow_tapir_init_chunk_size=cow_tapir_init_chunk_size,
                 cow_frontend_type=cow_frontend_type,
                 cow_anchor_state_mix=cow_anchor_state_mix,
                 cow_anchor_skip_mix=cow_anchor_skip_mix,
@@ -455,8 +465,8 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
     def _neutral_prob_init(batch_size: int, total_len: int, height: int, width: int, device, dtype):
         return torch.full((batch_size, total_len, height, width), 0.5, device=device, dtype=dtype)
 
+    @staticmethod
     def _build_window_init(
-        self,
         dense_track,
         dense_vis,
         dense_conf,
@@ -467,40 +477,69 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         width: int,
         device,
         dtype,
+        window_prefix_len: int = 0,
+        return_valid_mask: bool = False,
     ):
         total_len = int(memory_len) + int(window_len)
+
+        def pack(track, vis, conf, valid_mask):
+            if return_valid_mask:
+                return track, vis, conf, valid_mask
+            return track, vis, conf
+
         if total_len <= 0:
-            return None, None, None
+            return pack(None, None, None, None)
 
         if memory_len <= 0 and (
             dense_track is None or dense_vis is None or dense_conf is None or overlap <= 0
         ):
-            return None, None, None
+            return pack(None, None, None, None)
 
-        init_track = self._neutral_track_init(1, total_len, height, width, device, dtype)
-        init_vis = self._neutral_prob_init(1, total_len, height, width, device, dtype)
-        init_conf = self._neutral_prob_init(1, total_len, height, width, device, dtype)
+        init_track = TAPFormerCowDense_online._neutral_track_init(
+            1, total_len, height, width, device, dtype
+        )
+        init_vis = TAPFormerCowDense_online._neutral_prob_init(
+            1, total_len, height, width, device, dtype
+        )
+        init_conf = TAPFormerCowDense_online._neutral_prob_init(
+            1, total_len, height, width, device, dtype
+        )
+        valid_mask = torch.zeros(
+            1, total_len, height, width, device=device, dtype=torch.bool
+        )
 
         if dense_track is None or dense_vis is None or dense_conf is None or overlap <= 0:
-            return init_track, init_vis, init_conf
+            return pack(init_track, init_vis, init_conf, valid_mask)
 
-        copy_len = min(int(overlap), int(window_len), int(dense_track.shape[1]))
+        prefix_len = min(max(int(window_prefix_len), 0), int(window_len))
+        copy_len = min(
+            int(overlap),
+            int(window_len) - prefix_len,
+            int(dense_track.shape[1]),
+        )
         if copy_len <= 0:
-            return init_track, init_vis, init_conf
+            return pack(init_track, init_vis, init_conf, valid_mask)
 
-        start = int(memory_len)
+        start = int(memory_len) + prefix_len
         end = start + copy_len
         init_track[:, start:end] = dense_track[:, -copy_len:].to(device=device, dtype=dtype)
         init_vis[:, start:end] = dense_vis[:, -copy_len:].to(device=device, dtype=dtype)
         init_conf[:, start:end] = dense_conf[:, -copy_len:].to(device=device, dtype=dtype)
+        valid_mask[:, start:end] = True
 
-        if copy_len < window_len:
-            pad_len = window_len - copy_len
-            init_track[:, end : end + pad_len] = init_track[:, end - 1 : end].expand(-1, pad_len, -1, -1, -1)
-            init_vis[:, end : end + pad_len] = init_vis[:, end - 1 : end].expand(-1, pad_len, -1, -1)
-            init_conf[:, end : end + pad_len] = init_conf[:, end - 1 : end].expand(-1, pad_len, -1, -1)
+        pad_len = int(window_len) - prefix_len - copy_len
+        if pad_len > 0:
+            init_track[:, end : end + pad_len] = init_track[:, end - 1 : end].expand(
+                -1, pad_len, -1, -1, -1
+            )
+            init_vis[:, end : end + pad_len] = init_vis[:, end - 1 : end].expand(
+                -1, pad_len, -1, -1
+            )
+            init_conf[:, end : end + pad_len] = init_conf[:, end - 1 : end].expand(
+                -1, pad_len, -1, -1
+            )
 
-        return init_track, init_vis, init_conf
+        return pack(init_track, init_vis, init_conf, valid_mask)
 
     @staticmethod
     def _slice_dense_debug_window(dense_debug, memory_len: int):
@@ -579,6 +618,7 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
         prev_dense_track = None
         prev_dense_vis = None
         prev_dense_conf = None
+        tapir_init_enabled = bool(getattr(self.dense_head, "tapir_init_enabled", False))
         feature_bank = {} if self.cow_online_use_memory_features else None
         global_first_feature = None
         if self.cow_online_use_global_first_anchor:
@@ -593,6 +633,7 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
             end = min(ind + S, T)
             overlap = max(0, prev_end - ind)
             init_track = init_vis = init_conf = None
+            init_valid_mask = None
             encoded_features = None
             encoded_start = None
             if ind == 0:
@@ -606,7 +647,10 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 encoded_features = window_features
                 encoded_start = ind
             else:
-                window_query_xy = coords_predicted[:, ind].clone()
+                if tapir_init_enabled and self.cow_online_use_global_first_anchor:
+                    window_query_xy = query_xy
+                else:
+                    window_query_xy = coords_predicted[:, ind].clone()
                 new_start = ind + overlap
                 new_features = self._encode_window_features(
                     rgbs[:, new_start:end],
@@ -640,7 +684,7 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
             tracked_features = window_features if memory_features is None else torch.cat([memory_features, window_features], dim=1)
 
             if self.cow_online_use_window_init:
-                init_track, init_vis, init_conf = self._build_window_init(
+                init_values = self._build_window_init(
                     prev_dense_track,
                     prev_dense_vis,
                     prev_dense_conf,
@@ -651,7 +695,16 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                     width=interp_shape[1],
                     device=tracked_features.device,
                     dtype=tracked_features.dtype,
+                    return_valid_mask=tapir_init_enabled,
                 )
+                if tapir_init_enabled:
+                    init_track, init_vis, init_conf, init_valid_mask = init_values
+                else:
+                    init_track, init_vis, init_conf = init_values
+
+            window_anchor_features = global_first_feature
+            if tapir_init_enabled and window_anchor_features is None and memory_len > 0:
+                window_anchor_features = window_features[:, :1]
 
             traj, vis, conf, _, _, _, dense_debug = self._forward_window(
                 tracked_features,
@@ -661,7 +714,8 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 init_track=init_track,
                 init_vis=init_vis,
                 init_conf=init_conf,
-                first_frame_features=global_first_feature,
+                init_valid_mask=init_valid_mask,
+                first_frame_features=window_anchor_features,
                 return_debug=self.cow_online_use_window_init,
             )
 
@@ -736,6 +790,11 @@ class TAPFormerCowDense_windowed(TAPFormerCowDense):
         cow_max_flow_magnitude_ratio=1.0,
         cow_refine_checkpoint=False,
         cow_info_update_mode="direct",
+        cow_tapir_init=False,
+        cow_tapir_init_stride=16,
+        cow_tapir_init_temperature=20.0,
+        cow_tapir_init_radius=5,
+        cow_tapir_init_chunk_size=64,
         cow_window_stride=None,
         cow_window_num_memory_frames=None,
         cow_online_use_window_init=False,
@@ -746,7 +805,7 @@ class TAPFormerCowDense_windowed(TAPFormerCowDense):
         cow_anchor_state_mix=0.7,
         cow_anchor_skip_mix=0.7,
     ):
-        del cow_online_use_window_init, cow_online_use_global_first_anchor, cow_online_use_memory_features
+        del cow_online_use_global_first_anchor, cow_online_use_memory_features
 
         if trained_model is not None:
             super().__init__(
@@ -797,6 +856,11 @@ class TAPFormerCowDense_windowed(TAPFormerCowDense):
                 cow_max_flow_magnitude_ratio=cow_max_flow_magnitude_ratio,
                 cow_refine_checkpoint=cow_refine_checkpoint,
                 cow_info_update_mode=cow_info_update_mode,
+                cow_tapir_init=cow_tapir_init,
+                cow_tapir_init_stride=cow_tapir_init_stride,
+                cow_tapir_init_temperature=cow_tapir_init_temperature,
+                cow_tapir_init_radius=cow_tapir_init_radius,
+                cow_tapir_init_chunk_size=cow_tapir_init_chunk_size,
                 cow_frontend_type=cow_frontend_type,
                 cow_anchor_state_mix=cow_anchor_state_mix,
                 cow_anchor_skip_mix=cow_anchor_skip_mix,
@@ -815,6 +879,7 @@ class TAPFormerCowDense_windowed(TAPFormerCowDense):
         self.cow_window_num_memory_frames = int(resolved_memory)
         if self.cow_window_num_memory_frames < 0:
             raise ValueError("cow_window_num_memory_frames must be non-negative")
+        self.cow_online_use_window_init = bool(cow_online_use_window_init)
 
     @staticmethod
     def _compute_windows(total_frames: int, window_len: int, stride: int):
@@ -938,6 +1003,10 @@ class TAPFormerCowDense_windowed(TAPFormerCowDense):
         coords_predicted = torch.zeros((B, T, N, 2), device=device, dtype=queries.dtype)
         vis_predicted = torch.zeros((B, T, N), device=device, dtype=queries.dtype)
         conf_predicted = torch.zeros((B, T, N), device=device, dtype=queries.dtype)
+        prev_dense_track = None
+        prev_dense_vis = None
+        prev_dense_conf = None
+        tapir_init_enabled = bool(getattr(self.dense_head, "tapir_init_enabled", False))
 
         first_frame_features = self._encode_window_features(
             rgbs[:, :1],
@@ -989,12 +1058,40 @@ class TAPFormerCowDense_windowed(TAPFormerCowDense):
             else:
                 gathered_features = short_and_current_features
 
-            traj, vis, conf, _, _, _, _ = self._forward_window(
+            init_track = init_vis = init_conf = None
+            init_valid_mask = None
+            if self.cow_online_use_window_init:
+                overlap = max(0, previous_end - start)
+                init_values = TAPFormerCowDense_online._build_window_init(
+                    prev_dense_track,
+                    prev_dense_vis,
+                    prev_dense_conf,
+                    window_len=short_and_current_features.shape[1],
+                    overlap=overlap,
+                    memory_len=len(long_term_indices) if tapir_init_enabled else 0,
+                    height=interp_shape[0],
+                    width=interp_shape[1],
+                    device=gathered_features.device,
+                    dtype=gathered_features.dtype,
+                    window_prefix_len=start - aligned_start if tapir_init_enabled else 0,
+                    return_valid_mask=tapir_init_enabled,
+                )
+                if tapir_init_enabled:
+                    init_track, init_vis, init_conf, init_valid_mask = init_values
+                else:
+                    init_track, init_vis, init_conf = init_values
+
+            traj, vis, conf, _, _, _, dense_debug = self._forward_window(
                 gathered_features,
                 query_xy,
                 image_size=interp_shape,
                 iters=int(iters),
+                init_track=init_track,
+                init_vis=init_vis,
+                init_conf=init_conf,
+                init_valid_mask=init_valid_mask,
                 first_frame_features=first_frame_features,
+                return_debug=self.cow_online_use_window_init,
             )
             prefix_len = len(long_term_indices) + (start - aligned_start)
             traj_window = traj[:, prefix_len : prefix_len + end - start].clone()
@@ -1004,6 +1101,12 @@ class TAPFormerCowDense_windowed(TAPFormerCowDense):
             self._merge_window_predictions(start, end, previous_end, traj_window, coords_predicted)
             self._merge_window_predictions(start, end, previous_end, vis_window, vis_predicted)
             self._merge_window_predictions(start, end, previous_end, conf_window, conf_predicted)
+            if self.cow_online_use_window_init:
+                if dense_debug is None:
+                    raise RuntimeError("dense_debug is required when cow_online_use_window_init is enabled")
+                prev_dense_track = dense_debug["dense_tracks"][:, prefix_len:].clone()
+                prev_dense_vis = dense_debug["dense_vis"][:, prefix_len:].clone()
+                prev_dense_conf = dense_debug["dense_conf"][:, prefix_len:].clone()
             previous_end = max(previous_end, end)
 
         return coords_predicted, vis_predicted, conf_predicted

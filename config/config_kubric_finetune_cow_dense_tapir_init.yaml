@@ -1,4 +1,4 @@
-# Configuration file for Kubric/ETAP training with TAPFormer fusion + CoW-style dense head
+# Fine-tune CowDense with TAPIR-style semi-dense cost-volume initialization.
 
 dataset:
   data_root: "data/event_kubric/train"
@@ -12,24 +12,27 @@ dataset:
   choose_long_point: false
   use_augs: false
   if_test: false
-  global_first_train_prob: 0.0
+  global_first_train_prob: 1.0
+  packed_window_train: true
+  num_first_frames: 1
+  num_memory_frames: 3
+  num_current_frames: 8
 
 train:
-  save_dir: "output/train_kubric_cow_dense"
-  epochs: 10
+  save_dir: "output/finetune_kubric_cow_dense_tapir_init"
+  epochs: 1
   batch_size: 1
   num_workers: 8
   shuffle: true
   pin_memory: true
   drop_last: true
-  lr: 0.0001
-  # lr: 0.0002
+  lr: 0.00002
   weight_decay: 0.0001
   grad_clip_norm: 1.0
   scheduler:
     enabled: true
     type: "cosine"
-    warmup_steps: 3000
+    warmup_steps: 500
     min_lr: 1.0e-6
     step_on: "step"
   iters: 5
@@ -42,13 +45,13 @@ train:
   best_filename: "best.pth"
   precision: "bf16"
   seed: 0
-  pretrained: null
+  pretrained: "output/train_kubric_cow_dense/20260606_234701/best.pth"
   pretrained_strict: false
   resume: null
 
 model:
   name: "tapformer_cow_dense"
-  window_size: 16
+  window_size: 8
   stride: 4
   corr_levels: 3
   corr_radius: 3
@@ -64,14 +67,21 @@ model:
   cow_max_flow_update_ratio: 0.15
   cow_max_flow_magnitude_ratio: 1.0
   cow_refine_checkpoint: true
-  cow_info_update_mode: "iterative"  # direct | iterative
-  cow_frontend_type: "base"  # "base" | "frame_anchor"
+  cow_info_update_mode: "iterative"
+  cow_tapir_init: true
+  cow_tapir_init_stride: 16
+  cow_tapir_init_temperature: 20.0
+  cow_tapir_init_radius: 5
+  cow_tapir_init_chunk_size: 64
+  cow_window_stride: 4
+  cow_window_num_memory_frames: 3
+  cow_frontend_type: "base"
   cow_anchor_state_mix: 0.7
   cow_anchor_skip_mix: 0.7
 
 loss:
   coord_weight: 0.05
-  invisible_coord_weight: 0.01 #0.01
+  invisible_coord_weight: 0.01
   visibility_weight: 1.0
   confidence_weight: 1.0
   iter_gamma: 0.8

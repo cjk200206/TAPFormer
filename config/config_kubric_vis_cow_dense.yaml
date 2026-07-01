@@ -34,7 +34,7 @@ model:
   cow_max_flow_magnitude_ratio: 1.0
   cow_refine_checkpoint: true
   cow_info_update_mode: "iterative"  # direct | iterative
-  cow_online_use_window_init: false
+  cow_online_use_window_init: true
   cow_online_use_global_first_anchor: true
   cow_online_use_memory_features: false
   cow_online_num_memory_frames: 8

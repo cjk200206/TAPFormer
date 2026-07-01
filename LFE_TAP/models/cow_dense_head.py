@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from LFE_TAP.models.cow_refine import VideoRefineTransformer, MODEL_CONFIGS
+from LFE_TAP.models.tapir_initializer import TapirCostVolumeInitializer
 
 
 def coords_grid(batch: int, height: int, width: int, device, dtype) -> torch.Tensor:
@@ -42,6 +43,11 @@ class DenseWarpTrackingHead(nn.Module):
         max_flow_magnitude_ratio: float = 1.0,
         refine_checkpoint: bool = False,
         info_update_mode: str = "direct",
+        tapir_init: bool = False,
+        tapir_init_stride: int = 16,
+        tapir_init_temperature: float = 20.0,
+        tapir_init_radius: int = 5,
+        tapir_init_chunk_size: int = 64,
     ):
         super().__init__()
         if refine_model not in MODEL_CONFIGS:
@@ -53,6 +59,7 @@ class DenseWarpTrackingHead(nn.Module):
         self.max_flow_magnitude_ratio = float(max_flow_magnitude_ratio)
         self.refine_checkpoint = bool(refine_checkpoint)
         self.info_update_mode = str(info_update_mode).lower().strip()
+        self.tapir_init_enabled = bool(tapir_init)
         if self.info_update_mode not in {"direct", "iterative"}:
             raise ValueError(
                 f"Unsupported info_update_mode={info_update_mode}. Use one of: direct, iterative."
@@ -84,6 +91,14 @@ class DenseWarpTrackingHead(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(2 * self.iter_dim, (self.down_ratio**2) * 9, 1),
         )
+        self.tapir_initializer = None
+        if self.tapir_init_enabled:
+            self.tapir_initializer = TapirCostVolumeInitializer(
+                stride=tapir_init_stride,
+                temperature=tapir_init_temperature,
+                softargmax_radius=tapir_init_radius,
+                chunk_size=tapir_init_chunk_size,
+            )
 
     def _upsample_single(self, flow: torch.Tensor, info: torch.Tensor, mask: torch.Tensor):
         B, _, H, W = flow.shape
@@ -164,6 +179,27 @@ class DenseWarpTrackingHead(nn.Module):
             info[:, idx : idx + 1] = torch.logit(prob)
         return info.view(B, T, 2, H, W)
 
+    @staticmethod
+    def _resize_init_mask(
+        init_valid_mask: torch.Tensor,
+        B: int,
+        T: int,
+        H: int,
+        W: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        mask = init_valid_mask.to(device=device)
+        if mask.ndim == 4:
+            mask = mask.unsqueeze(2)
+        if mask.shape[:3] != (B, T, 1):
+            raise ValueError("init_valid_mask must have shape [B,T,H,W] or [B,T,1,H,W].")
+        mask = F.interpolate(
+            mask.float().reshape(B * T, 1, *mask.shape[-2:]),
+            size=(H, W),
+            mode="nearest",
+        )
+        return mask.view(B, T, 1, H, W).bool()
+
     def _format_predictions(
         self,
         flow: torch.Tensor,
@@ -214,6 +250,7 @@ class DenseWarpTrackingHead(nn.Module):
         init_track: Optional[torch.Tensor] = None,
         init_vis: Optional[torch.Tensor] = None,
         init_conf: Optional[torch.Tensor] = None,
+        init_valid_mask: Optional[torch.Tensor] = None,
         first_frame_features: Optional[torch.Tensor] = None,
         return_debug: bool = False,
     ):
@@ -231,10 +268,43 @@ class DenseWarpTrackingHead(nn.Module):
         frame0 = frame0_base.expand(B, T, -1, -1, -1)
         net = self.hidden_conv(torch.cat([frame0, fmap], dim=2).reshape(B * T, -1, H, W))
         net = net.view(B, T, self.iter_dim, H, W)
-        flow = self._init_flow(init_track, B, T, H, W, H_img, W_img, features.device, features.dtype)
-        info = self._init_info(init_vis, init_conf, B, T, H, W, features.device, features.dtype)
-
         track_preds, vis_preds, conf_preds = [], [], []
+        history_flow = self._init_flow(
+            init_track, B, T, H, W, H_img, W_img, features.device, features.dtype
+        )
+        history_info = self._init_info(
+            init_vis, init_conf, B, T, H, W, features.device, features.dtype
+        )
+        if self.tapir_initializer is None:
+            flow, info = history_flow, history_info
+        else:
+            anchor_features = (
+                first_frame_features if first_frame_features is not None else features[:, :1]
+            )
+            flow, info = self.tapir_initializer(
+                features,
+                anchor_features,
+                image_size=image_size,
+                tracking_size=(H, W),
+                local_anchor=first_frame_features is None,
+            )
+            if init_track is not None:
+                if init_valid_mask is None:
+                    flow, info = history_flow, history_info
+                else:
+                    valid_mask = self._resize_init_mask(
+                        init_valid_mask, B, T, H, W, features.device
+                    )
+                    flow = torch.where(valid_mask, history_flow, flow)
+                    info = torch.where(valid_mask, history_info, info)
+
+            dense_tracks, dense_vis, dense_conf = self._format_predictions(
+                flow, info, net, image_size
+            )
+            track_preds.append(dense_tracks)
+            vis_preds.append(dense_vis)
+            conf_preds.append(dense_conf)
+
         dense_debug = None
         base_coords = coords_grid(B * T, H, W, features.device, features.dtype)
         for _ in range(n_iters):
