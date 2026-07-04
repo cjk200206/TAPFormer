@@ -242,6 +242,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     global_first_train_prob = float(dataset_cfg.get("global_first_train_prob", 0.0))
+    reference_only_train = (
+        bool(dataset_cfg.get("packed_window_train", False))
+        and int(dataset_cfg.get("num_first_frames", 0)) == 0
+        and int(dataset_cfg.get("num_memory_frames", 0)) == 0
+    )
     model_name = str(model_cfg.get("name", "tapformer")).lower().strip()
     if global_first_train_prob > 0.0 and model_name not in {"tapformer_cow_dense", "cow_dense"}:
         raise ValueError(
@@ -281,6 +286,10 @@ def main():
         num_first_frames=int(dataset_cfg.get("num_first_frames", 0)),
         num_memory_frames=int(dataset_cfg.get("num_memory_frames", 0)),
         num_current_frames=int(dataset_cfg.get("num_current_frames", 0)),
+        window_gap_bin_edges=dataset_cfg.get("window_gap_bin_edges"),
+        window_gap_probs_start=dataset_cfg.get("window_gap_probs_start"),
+        window_gap_probs_end=dataset_cfg.get("window_gap_probs_end"),
+        window_gap_curriculum_epochs=dataset_cfg.get("window_gap_curriculum_epochs"),
     )
 
     loader = DataLoader(
@@ -395,6 +404,7 @@ def main():
             best_sign = metric_sign(best_mode)
 
     for epoch in range(start_epoch, epochs):
+        dataset.set_epoch(epoch)
         running = {"loss": 0.0, "coord_loss": 0.0, "invisible_coord_loss": 0.0, "visibility_loss": 0.0, "confidence_loss": 0.0}
         n_steps = 0
 
@@ -418,6 +428,7 @@ def main():
                     img_ifnew=sample.img_ifnew[0],
                     reference_rgbs=sample.reference_video,
                     reference_events=sample.reference_events,
+                    reference_only_train=reference_only_train,
                     is_train=True,
                 )
                 loss_dict = criterion(

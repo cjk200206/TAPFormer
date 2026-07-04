@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import torch
 import imageio
@@ -816,6 +817,10 @@ class KubricMovifDataset_etap(FETAPDataset):
         num_first_frames=0,
         num_memory_frames=0,
         num_current_frames=0,
+        window_gap_bin_edges=None,
+        window_gap_probs_start=None,
+        window_gap_probs_end=None,
+        window_gap_curriculum_epochs=None,
     ):
         super(KubricMovifDataset_etap, self).__init__(
             root_dir=root_dir,
@@ -842,6 +847,11 @@ class KubricMovifDataset_etap(FETAPDataset):
         self.num_first_frames = int(num_first_frames)
         self.num_memory_frames = int(num_memory_frames)
         self.num_current_frames = int(num_current_frames)
+        self.window_gap_bin_edges = None
+        self.window_gap_probs_start = None
+        self.window_gap_probs_end = None
+        self.window_gap_curriculum_epochs = None
+        self._epoch = multiprocessing.Value("i", 0)
         if self.packed_window_train:
             frame_budget = self.num_first_frames + self.num_memory_frames + self.num_current_frames
             if frame_budget != self.seq_len:
@@ -849,20 +859,86 @@ class KubricMovifDataset_etap(FETAPDataset):
                     'Packed window training requires '
                     'dataset.num_first_frames + dataset.num_memory_frames + dataset.num_current_frames == dataset.seq_len.'
                 )
-            if self.num_first_frames <= 0:
-                raise ValueError('dataset.num_first_frames must be positive when packed_window_train=true.')
+            if self.num_first_frames < 0 or self.num_memory_frames < 0:
+                raise ValueError('Packed first/memory frame counts must be non-negative.')
             if self.num_current_frames <= 0:
                 raise ValueError('dataset.num_current_frames must be positive when packed_window_train=true.')
             if self.global_first_train_prob <= 0.0:
                 raise ValueError('dataset.global_first_train_prob must be > 0 when packed_window_train=true.')
             if self.if_test:
                 raise ValueError('packed_window_train only supports training samples (dataset.if_test=false).')
+        gap_values = (
+            window_gap_bin_edges,
+            window_gap_probs_start,
+            window_gap_probs_end,
+            window_gap_curriculum_epochs,
+        )
+        if any(value is not None for value in gap_values):
+            if not all(value is not None for value in gap_values):
+                raise ValueError('All window-gap curriculum settings must be provided together.')
+            edges = np.asarray(window_gap_bin_edges, dtype=np.int64)
+            probs_start = np.asarray(window_gap_probs_start, dtype=np.float64)
+            probs_end = np.asarray(window_gap_probs_end, dtype=np.float64)
+            curriculum = np.asarray(window_gap_curriculum_epochs, dtype=np.int64)
+            if edges.ndim != 1 or len(edges) == 0 or edges[0] < 1 or np.any(np.diff(edges) <= 0):
+                raise ValueError('dataset.window_gap_bin_edges must be positive and strictly increasing.')
+            if probs_start.shape != edges.shape or probs_end.shape != edges.shape:
+                raise ValueError('Window-gap probability lists must match window_gap_bin_edges.')
+            if np.any(probs_start < 0) or np.any(probs_end < 0):
+                raise ValueError('Window-gap probabilities must be non-negative.')
+            if probs_start.sum() <= 0 or probs_end.sum() <= 0:
+                raise ValueError('Window-gap probability lists must have a positive sum.')
+            if curriculum.shape != (2,) or curriculum[1] < curriculum[0]:
+                raise ValueError('dataset.window_gap_curriculum_epochs must be [start, end] with end >= start.')
+            self.window_gap_bin_edges = edges
+            self.window_gap_probs_start = probs_start / probs_start.sum()
+            self.window_gap_probs_end = probs_end / probs_end.sum()
+            self.window_gap_curriculum_epochs = curriculum
         self.seq_names = [
             os.path.join(self.root_dir, fname)
             for fname in os.listdir(self.root_dir)
             if os.path.isdir(os.path.join(self.root_dir, fname))
         ]
         print("found %d unique seqences in %s" % (len(self.seq_names), self.root_dir))
+
+    def set_epoch(self, epoch: int):
+        self._epoch.value = int(epoch)
+
+    def _sample_current_start(self, min_start: int, max_start: int) -> int:
+        if min_start > max_start:
+            raise ValueError('Sequence is too short for the configured packed current window.')
+        if self.window_gap_bin_edges is None:
+            return int(np.random.randint(min_start, max_start + 1))
+
+        epoch_start, epoch_end = self.window_gap_curriculum_epochs
+        if epoch_end == epoch_start:
+            progress = float(self._epoch.value >= epoch_end)
+        else:
+            progress = np.clip((self._epoch.value - epoch_start) / (epoch_end - epoch_start), 0.0, 1.0)
+        probabilities = (1.0 - progress) * self.window_gap_probs_start + progress * self.window_gap_probs_end
+
+        valid_bins = []
+        valid_weights = []
+        for index, lower_edge in enumerate(self.window_gap_bin_edges):
+            upper_edge = (
+                self.window_gap_bin_edges[index + 1] - 1
+                if index + 1 < len(self.window_gap_bin_edges)
+                else max_start
+            )
+            lower = max(min_start, int(lower_edge))
+            upper = min(max_start, int(upper_edge))
+            if lower <= upper:
+                valid_bins.append((lower, upper))
+                valid_weights.append(probabilities[index])
+
+        if not valid_bins:
+            return int(np.random.randint(min_start, max_start + 1))
+        valid_weights = np.asarray(valid_weights, dtype=np.float64)
+        if valid_weights.sum() <= 0:
+            valid_weights = np.ones_like(valid_weights)
+        valid_weights /= valid_weights.sum()
+        lower, upper = valid_bins[np.random.choice(len(valid_bins), p=valid_weights)]
+        return int(np.random.randint(lower, upper + 1))
 
     def _load_sequence_data(self, seq_name):
         npy_path = os.path.join(seq_name, "annotations.npy")
@@ -1187,12 +1263,7 @@ class KubricMovifDataset_etap(FETAPDataset):
             )
             if self.packed_window_train and use_global_first:
                 min_current_start = max(1, self.num_first_frames + self.num_memory_frames)
-                if max_current_start <= 0:
-                    current_start = 0
-                elif min_current_start <= max_current_start:
-                    current_start = np.random.randint(min_current_start, max_current_start + 1)
-                else:
-                    current_start = max(1, max_current_start)
+                current_start = self._sample_current_start(min_current_start, max_current_start)
                 frame_indices = self._build_packed_frame_indices(current_start, total_frames)
                 sample, gotit, candidate_count, sampled_random_id = self._build_sample_from_window(
                     seq_name,

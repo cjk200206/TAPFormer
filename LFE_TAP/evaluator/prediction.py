@@ -647,7 +647,7 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                 encoded_features = window_features
                 encoded_start = ind
             else:
-                if tapir_init_enabled and self.cow_online_use_global_first_anchor:
+                if self.cow_online_use_global_first_anchor:
                     window_query_xy = query_xy
                 else:
                     window_query_xy = coords_predicted[:, ind].clone()

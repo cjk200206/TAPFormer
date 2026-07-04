@@ -215,6 +215,7 @@ class TAPFormerCowDense(nn.Module):
         init_conf: torch.Tensor | None = None,
         init_valid_mask: torch.Tensor | None = None,
         first_frame_features: torch.Tensor | None = None,
+        force_reference_anchor: bool = False,
         return_debug: bool = False,
     ):
         if first_frame_features is not None:
@@ -224,7 +225,7 @@ class TAPFormerCowDense(nn.Module):
                     "first_frame_features must have shape [B,1,C,H,W] matching features."
                 )
 
-        prepend_anchor = not self.training and first_frame_features is not None
+        prepend_anchor = first_frame_features is not None and (not self.training or force_reference_anchor)
         if prepend_anchor:
             features = torch.cat(
                 [first_frame_features.to(device=features.device, dtype=features.dtype), features],
@@ -322,29 +323,48 @@ class TAPFormerCowDense(nn.Module):
         is_train=False,
         reference_rgbs=None,
         reference_events=None,
+        reference_only_train=False,
     ):
         _, T, _, H, W, _, _ = self._validate_inputs(rgbs, events, queries, iters)
         queried_frames = queries[:, :, 0].long()
         query_xy = self._prepare_query_xy(queries)
-        features = self._encode_features(rgbs, events, img_ifnew=img_ifnew)
         first_frame_features = None
-        if reference_rgbs is not None and reference_events is not None:
+        has_reference = reference_rgbs is not None and reference_events is not None
+        if reference_only_train and not has_reference:
+            raise ValueError("reference_only_train requires reference_rgbs and reference_events.")
+        if reference_only_train:
             reference_ifnew = torch.ones(
                 reference_rgbs.shape[1],
                 device=reference_rgbs.device,
                 dtype=reference_rgbs.dtype,
             )
-            first_frame_features = self._encode_features(
+            first_frame_features = self._encode_window_features(
                 reference_rgbs,
                 reference_events,
                 img_ifnew=reference_ifnew,
+                reset_state=True,
             )
+            features = self._encode_window_features(rgbs, events, img_ifnew=img_ifnew, reset_state=True)
+        else:
+            features = self._encode_features(rgbs, events, img_ifnew=img_ifnew)
+            if has_reference:
+                reference_ifnew = torch.ones(
+                    reference_rgbs.shape[1],
+                    device=reference_rgbs.device,
+                    dtype=reference_rgbs.dtype,
+                )
+                first_frame_features = self._encode_features(
+                    reference_rgbs,
+                    reference_events,
+                    img_ifnew=reference_ifnew,
+                )
         coords_predicted, vis_predicted, conf_predicted, coord_preds, vis_preds, conf_preds, _ = self._forward_window(
             features,
             query_xy,
             image_size=(H, W),
             iters=int(iters),
             first_frame_features=first_frame_features,
+            force_reference_anchor=bool(reference_only_train),
         )
 
         if is_train:
