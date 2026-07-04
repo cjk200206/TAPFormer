@@ -24,7 +24,12 @@ def bilinear_sampler(img: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
     xgrid, ygrid = coords.split([1, 1], dim=-1)
     xgrid = 2 * xgrid / max(W - 1, 1) - 1
     ygrid = 2 * ygrid / max(H - 1, 1) - 1
-    return F.grid_sample(img, torch.cat([xgrid, ygrid], dim=-1), align_corners=True, padding_mode="border")
+
+    grid = torch.cat([xgrid, ygrid], dim=-1)
+    img = F.grid_sample(img, grid, align_corners=True)
+    # img = F.grid_sample(img, grid, align_corners=True, padding_mode="border")
+
+    return img
 
 
 class DenseWarpTrackingHead(nn.Module):
@@ -133,6 +138,9 @@ class DenseWarpTrackingHead(nn.Module):
                 mode="bilinear",
                 align_corners=True,
             ).reshape(B, T, 2, H_img, W_img)
+        if not self.training:
+            flow = flow - flow[:, 0:1]
+            flow[:, 0] = 0
         grid = coords_grid(B * T, H_img, W_img, flow.device, flow.dtype).view(B, T, 2, H_img, W_img)
         return (grid + flow).permute(0, 1, 3, 4, 2)
 

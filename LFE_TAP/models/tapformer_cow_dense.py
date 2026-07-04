@@ -170,6 +170,40 @@ class TAPFormerCowDense(nn.Module):
             self._reset_fusion_state()
         return self._encode_features(rgbs, events, img_ifnew=img_ifnew)
 
+    @staticmethod
+    def _prepend_anchor_initialization(
+        init_track,
+        init_vis,
+        init_conf,
+        init_valid_mask,
+        image_size: Tuple[int, int],
+    ):
+        if init_track is not None:
+            H_img, W_img = image_size
+            if init_track.shape[-3:] != (H_img, W_img, 2):
+                raise ValueError("init_track must match image_size before prepending the anchor.")
+            y, x = torch.meshgrid(
+                torch.arange(H_img, device=init_track.device, dtype=init_track.dtype),
+                torch.arange(W_img, device=init_track.device, dtype=init_track.dtype),
+                indexing="ij",
+            )
+            identity = torch.stack([x, y], dim=-1)[None, None].expand(init_track.shape[0], 1, -1, -1, -1)
+            init_track = torch.cat([identity, init_track], dim=1)
+
+        def prepend_neutral(prob):
+            if prob is None:
+                return None
+            return torch.cat([torch.full_like(prob[:, :1], 0.5), prob], dim=1)
+
+        init_vis = prepend_neutral(init_vis)
+        init_conf = prepend_neutral(init_conf)
+        if init_valid_mask is not None:
+            init_valid_mask = torch.cat(
+                [torch.ones_like(init_valid_mask[:, :1]), init_valid_mask],
+                dim=1,
+            )
+        return init_track, init_vis, init_conf, init_valid_mask
+
     def _forward_window(
         self,
         features: torch.Tensor,
@@ -183,6 +217,27 @@ class TAPFormerCowDense(nn.Module):
         first_frame_features: torch.Tensor | None = None,
         return_debug: bool = False,
     ):
+        if first_frame_features is not None:
+            expected_shape = (features.shape[0], 1, features.shape[2], features.shape[3], features.shape[4])
+            if tuple(first_frame_features.shape) != expected_shape:
+                raise ValueError(
+                    "first_frame_features must have shape [B,1,C,H,W] matching features."
+                )
+
+        prepend_anchor = not self.training and first_frame_features is not None
+        if prepend_anchor:
+            features = torch.cat(
+                [first_frame_features.to(device=features.device, dtype=features.dtype), features],
+                dim=1,
+            )
+            init_track, init_vis, init_conf, init_valid_mask = self._prepend_anchor_initialization(
+                init_track,
+                init_vis,
+                init_conf,
+                init_valid_mask,
+                image_size,
+            )
+
         dense_debug = None
         dense_outputs = self.dense_head(
             features,
@@ -199,6 +254,13 @@ class TAPFormerCowDense(nn.Module):
             dense_coords, dense_vis_logits, dense_conf_logits, dense_debug = dense_outputs
         else:
             dense_coords, dense_vis_logits, dense_conf_logits = dense_outputs
+
+        if prepend_anchor:
+            dense_coords = [pred[:, 1:] for pred in dense_coords]
+            dense_vis_logits = [pred[:, 1:] for pred in dense_vis_logits]
+            dense_conf_logits = [pred[:, 1:] for pred in dense_conf_logits]
+            if dense_debug is not None:
+                dense_debug = {key: value[:, 1:] for key, value in dense_debug.items()}
 
         coord_preds: List[torch.Tensor] = [self._sample_dense(pred, query_xy) for pred in dense_coords]
         vis_preds: List[torch.Tensor] = [self._sample_dense_scalar(pred, query_xy) for pred in dense_vis_logits]

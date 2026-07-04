@@ -677,6 +677,8 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
             memory_len = 0
             if feature_bank is not None:
                 memory_indices = self._select_memory_frame_indices(window_idx, ind, self.cow_online_num_memory_frames)
+                if global_first_feature is not None:
+                    memory_indices = [idx for idx in memory_indices if idx != 0]
                 memory_features = self._gather_memory_features(feature_bank, memory_indices)
                 if memory_features is not None:
                     memory_len = int(memory_features.shape[1])
@@ -703,7 +705,7 @@ class TAPFormerCowDense_online(TAPFormerCowDense):
                     init_track, init_vis, init_conf = init_values
 
             window_anchor_features = global_first_feature
-            if tapir_init_enabled and window_anchor_features is None and memory_len > 0:
+            if window_anchor_features is None and memory_len > 0:
                 window_anchor_features = window_features[:, :1]
 
             traj, vis, conf, _, _, _, dense_debug = self._forward_window(
@@ -1021,6 +1023,8 @@ class TAPFormerCowDense_windowed(TAPFormerCowDense):
             aligned_start = self._find_aligned_start(start, img_ifnew)
             long_term_indices = []
             for idx in memory_indices:
+                if idx == 0:
+                    continue
                 if idx >= aligned_start:
                     continue
                 value = img_ifnew[idx]

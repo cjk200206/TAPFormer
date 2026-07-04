@@ -1,6 +1,7 @@
 # Visualization config for 8-frame cow-dense windowed inference
 
-ckpt_root: "output/train_kubric_cow_dense/20260701_000352/best.pth"
+# ckpt_root: "output/train_kubric_cow_dense/20260701_000352/best.pth"
+ckpt_root: "output/train_kubric_cow_dense/20260606_234701/best.pth"
 
 dataset:
   data_root: "data/event_kubric/test"
