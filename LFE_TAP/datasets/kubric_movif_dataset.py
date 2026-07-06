@@ -821,6 +821,9 @@ class KubricMovifDataset_etap(FETAPDataset):
         window_gap_probs_start=None,
         window_gap_probs_end=None,
         window_gap_curriculum_epochs=None,
+        paired_frame_event_prob=0.0,
+        paired_temporal_strides=(1,),
+        paired_temporal_stride_probs=(1.0,),
     ):
         super(KubricMovifDataset_etap, self).__init__(
             root_dir=root_dir,
@@ -847,6 +850,9 @@ class KubricMovifDataset_etap(FETAPDataset):
         self.num_first_frames = int(num_first_frames)
         self.num_memory_frames = int(num_memory_frames)
         self.num_current_frames = int(num_current_frames)
+        self.paired_frame_event_prob = float(paired_frame_event_prob)
+        self.paired_temporal_strides = np.asarray(paired_temporal_strides, dtype=np.int64)
+        self.paired_temporal_stride_probs = np.asarray(paired_temporal_stride_probs, dtype=np.float64)
         self.window_gap_bin_edges = None
         self.window_gap_probs_start = None
         self.window_gap_probs_end = None
@@ -867,6 +873,33 @@ class KubricMovifDataset_etap(FETAPDataset):
                 raise ValueError('dataset.global_first_train_prob must be > 0 when packed_window_train=true.')
             if self.if_test:
                 raise ValueError('packed_window_train only supports training samples (dataset.if_test=false).')
+        if not 0.0 <= self.paired_frame_event_prob <= 1.0:
+            raise ValueError('dataset.paired_frame_event_prob must be in [0, 1].')
+        if self.if_test and self.paired_frame_event_prob not in {0.0, 1.0}:
+            raise ValueError('Test-time paired_frame_event_prob must be either 0 or 1.')
+        if self.paired_temporal_strides.ndim != 1 or len(self.paired_temporal_strides) == 0:
+            raise ValueError('dataset.paired_temporal_strides must be a non-empty list.')
+        if (
+            np.any(self.paired_temporal_strides <= 0)
+            or len(np.unique(self.paired_temporal_strides)) != len(self.paired_temporal_strides)
+        ):
+            raise ValueError('dataset.paired_temporal_strides must contain unique positive integers.')
+        if self.paired_temporal_stride_probs.shape != self.paired_temporal_strides.shape:
+            raise ValueError('dataset.paired_temporal_stride_probs must match paired_temporal_strides.')
+        if np.any(self.paired_temporal_stride_probs < 0) or self.paired_temporal_stride_probs.sum() <= 0:
+            raise ValueError('dataset.paired_temporal_stride_probs must be non-negative with a positive sum.')
+        self.paired_temporal_stride_probs /= self.paired_temporal_stride_probs.sum()
+        if self.paired_frame_event_prob > 0.0 and not self.if_test:
+            reference_only = (
+                self.packed_window_train
+                and self.global_first_train_prob == 1.0
+                and self.num_first_frames == 0
+                and self.num_memory_frames == 0
+            )
+            if not reference_only:
+                raise ValueError(
+                    'Paired frame-event training requires global-first packed 0+0+current mode.'
+                )
         gap_values = (
             window_gap_bin_edges,
             window_gap_probs_start,
@@ -940,6 +973,25 @@ class KubricMovifDataset_etap(FETAPDataset):
         lower, upper = valid_bins[np.random.choice(len(valid_bins), p=valid_weights)]
         return int(np.random.randint(lower, upper + 1))
 
+    def _sample_paired_frame_event(self) -> bool:
+        if self.paired_frame_event_prob <= 0.0:
+            return False
+        if self.paired_frame_event_prob >= 1.0:
+            return True
+        return bool(np.random.rand() < self.paired_frame_event_prob)
+
+    def _sample_paired_temporal_stride(self, total_frames: int, min_start: int) -> int:
+        max_span = total_frames - 1 - min_start
+        valid = (self.num_current_frames - 1) * self.paired_temporal_strides <= max_span
+        if not np.any(valid):
+            raise ValueError('Sequence is too short for all configured paired temporal strides.')
+        strides = self.paired_temporal_strides[valid]
+        probabilities = self.paired_temporal_stride_probs[valid]
+        if probabilities.sum() <= 0:
+            probabilities = np.ones_like(probabilities)
+        probabilities = probabilities / probabilities.sum()
+        return int(np.random.choice(strides, p=probabilities))
+
     def _load_sequence_data(self, seq_name):
         npy_path = os.path.join(seq_name, "annotations.npy")
         rgb_dir_path = os.path.join(seq_name, "raw")
@@ -989,11 +1041,14 @@ class KubricMovifDataset_etap(FETAPDataset):
             memory_indices = sorted(memory_indices)[-self.num_memory_frames :]
         return sorted(memory_indices)
 
-    def _build_packed_frame_indices(self, current_start: int, total_frames: int):
+    def _build_packed_frame_indices(self, current_start: int, total_frames: int, temporal_stride: int = 1):
         if self.num_current_frames <= 0:
             raise ValueError('dataset.num_current_frames must be positive for packed window training.')
-        current_end = current_start + self.num_current_frames
-        if current_end > total_frames:
+        temporal_stride = int(temporal_stride)
+        if temporal_stride <= 0:
+            raise ValueError('temporal_stride must be positive.')
+        current_indices = [current_start + index * temporal_stride for index in range(self.num_current_frames)]
+        if current_indices[-1] >= total_frames:
             raise ValueError('Packed current window exceeds sequence length.')
 
         first_indices = list(range(min(self.num_first_frames, total_frames)))
@@ -1002,7 +1057,7 @@ class KubricMovifDataset_etap(FETAPDataset):
             pad_value = first_indices[-1] if first_indices else max(0, current_start - 1)
             memory_indices = [pad_value] * (self.num_memory_frames - len(memory_indices)) + memory_indices
 
-        frame_indices = first_indices + memory_indices + list(range(current_start, current_end))
+        frame_indices = first_indices + memory_indices + current_indices
         if len(frame_indices) != self.seq_len:
             raise ValueError('Packed window frame allocation must match dataset.seq_len exactly.')
         return frame_indices
@@ -1020,6 +1075,7 @@ class KubricMovifDataset_etap(FETAPDataset):
         use_global_first=False,
         frame_indices=None,
         current_start=None,
+        paired_frame_event=False,
     ):
         gotit = True
         rgb_imgs = []
@@ -1043,13 +1099,15 @@ class KubricMovifDataset_etap(FETAPDataset):
         next_insert = 0
         for i, img_path in enumerate(rgb_files):
             try:
-                if i == next_insert:
+                if paired_frame_event or i == next_insert:
                     img = imageio.v2.imread(os.path.join(rgb_dir_path, img_path))
                     if img.ndim == 3 and img.shape[-1] == 4:
                         img = img[..., :3]
                     rgb_imgs.append(img)
                     img_ifnew.append(1)
-                    if not self.if_test:
+                    if paired_frame_event:
+                        next_insert = i + 1
+                    elif not self.if_test:
                         next_insert += np.random.choice([3, 4])
                     else:
                         next_insert += 4
@@ -1239,6 +1297,7 @@ class KubricMovifDataset_etap(FETAPDataset):
         rgb_dir_path, event_dir_path, rgb_files, clear_rgb_files, event_files, annot_dict = self._load_sequence_data(seq_name)
 
         if self.if_test:
+            paired_frame_event = self._sample_paired_frame_event()
             sample, gotit, _, _ = self._build_sample_from_window(
                 seq_name,
                 rgb_dir_path,
@@ -1247,12 +1306,12 @@ class KubricMovifDataset_etap(FETAPDataset):
                 clear_rgb_files,
                 event_files,
                 annot_dict,
+                paired_frame_event=paired_frame_event,
             )
             return sample, gotit
 
         total_frames = self._train_total_frames(rgb_files, clear_rgb_files, event_files, annot_dict)
         max_contiguous_start = max(0, total_frames - self.seq_len)
-        max_current_start = max(0, total_frames - self.num_current_frames)
         last_candidate_count = 0
         last_random_id = None
         for _ in range(self.resample_max_tries):
@@ -1263,8 +1322,19 @@ class KubricMovifDataset_etap(FETAPDataset):
             )
             if self.packed_window_train and use_global_first:
                 min_current_start = max(1, self.num_first_frames + self.num_memory_frames)
-                current_start = self._sample_current_start(min_current_start, max_current_start)
-                frame_indices = self._build_packed_frame_indices(current_start, total_frames)
+                paired_frame_event = self._sample_paired_frame_event()
+                temporal_stride = (
+                    self._sample_paired_temporal_stride(total_frames, min_current_start)
+                    if paired_frame_event
+                    else 1
+                )
+                paired_max_start = total_frames - 1 - (self.num_current_frames - 1) * temporal_stride
+                current_start = self._sample_current_start(min_current_start, paired_max_start)
+                frame_indices = self._build_packed_frame_indices(
+                    current_start,
+                    total_frames,
+                    temporal_stride=temporal_stride,
+                )
                 sample, gotit, candidate_count, sampled_random_id = self._build_sample_from_window(
                     seq_name,
                     rgb_dir_path,
@@ -1277,6 +1347,7 @@ class KubricMovifDataset_etap(FETAPDataset):
                     use_global_first=True,
                     frame_indices=frame_indices,
                     current_start=current_start,
+                    paired_frame_event=paired_frame_event,
                 )
             else:
                 if max_contiguous_start <= 0:

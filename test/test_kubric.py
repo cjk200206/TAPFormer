@@ -257,6 +257,9 @@ def main():
         choose_long_point=bool(dataset_cfg.get("choose_long_point", False)),
         use_augs=bool(dataset_cfg.get("use_augs", False)),
         if_test=bool(dataset_cfg.get("if_test", True)),
+        paired_frame_event_prob=float(dataset_cfg.get("paired_frame_event_prob", 0.0)),
+        paired_temporal_strides=dataset_cfg.get("paired_temporal_strides", [1]),
+        paired_temporal_stride_probs=dataset_cfg.get("paired_temporal_stride_probs", [1.0]),
     )
 
     model = build_model_from_config(model_cfg, inference_mode=inference_mode)

@@ -290,6 +290,9 @@ def main():
         window_gap_probs_start=dataset_cfg.get("window_gap_probs_start"),
         window_gap_probs_end=dataset_cfg.get("window_gap_probs_end"),
         window_gap_curriculum_epochs=dataset_cfg.get("window_gap_curriculum_epochs"),
+        paired_frame_event_prob=float(dataset_cfg.get("paired_frame_event_prob", 0.0)),
+        paired_temporal_strides=dataset_cfg.get("paired_temporal_strides", [1]),
+        paired_temporal_stride_probs=dataset_cfg.get("paired_temporal_stride_probs", [1.0]),
     )
 
     loader = DataLoader(

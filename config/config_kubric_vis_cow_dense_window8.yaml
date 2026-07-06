@@ -1,7 +1,7 @@
 # Visualization config for 8-frame cow-dense windowed inference
 
-ckpt_root: "output/train_kubric_cow_dense/20260701_000352/best.pth"
-# ckpt_root: "output/train_kubric_cow_dense/20260606_234701/best.pth"
+ckpt_root: "output/train_kubric_cow_dense/20260703_014705/best.pth"
+# ckpt_root: "output/finetune_kubric_cow_dense_reference_window8/20260705_021443/best.pth"
 
 dataset:
   data_root: "data/event_kubric/test"
@@ -35,7 +35,7 @@ model:
   cow_max_flow_magnitude_ratio: 1.0
   cow_refine_checkpoint: true
   cow_info_update_mode: "iterative"  # direct | iterative
-  cow_online_use_window_init: true
+  cow_online_use_window_init: true # set "false" to check packed_window_train performance without window init 
   cow_online_use_global_first_anchor: false
   cow_online_use_memory_features: false
   cow_online_num_memory_frames: 3

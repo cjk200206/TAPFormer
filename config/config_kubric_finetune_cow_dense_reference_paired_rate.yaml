@@ -1,4 +1,7 @@
-# Fine-tuning config for a global reference and a contiguous 8-frame current window
+# Stage A: paired frame-event random-rate pre-adaptation for global-reference Cow Dense
+# Stage B: copy this config after Stage A, set paired_frame_event_prob=0.5,
+# lr=1e-5, epochs=3, and pretrained=<Stage A run>/final.pth. Keep the gap
+# distribution fixed by setting both window_gap_probs lists to the final values.
 
 dataset:
   data_root: "data/event_kubric/train"
@@ -17,13 +20,16 @@ dataset:
   num_first_frames: 0
   num_memory_frames: 0
   num_current_frames: 10
+  paired_frame_event_prob: 1.0
+  paired_temporal_strides: [1, 2, 3, 4]
+  paired_temporal_stride_probs: [0.55, 0.30, 0.10, 0.05]
   window_gap_bin_edges: [1, 9, 25, 49, 73]
   window_gap_probs_start: [0.40, 0.30, 0.18, 0.08, 0.04]
   window_gap_probs_end: [0.15, 0.20, 0.25, 0.22, 0.18]
   window_gap_curriculum_epochs: [1, 4]
 
 train:
-  save_dir: "output/finetune_kubric_cow_dense_reference_window8"
+  save_dir: "output/finetune_kubric_cow_dense_reference_paired_rate"
   epochs: 8
   batch_size: 1
   num_workers: 8
@@ -43,7 +49,7 @@ train:
   log_every: 100
   save_every_epochs: 0
   save_last: true
-  save_best: true
+  save_best: true  # Monitor only; use final.pth for the curriculum result.
   best_metric: "loss"
   best_mode: "min"
   best_filename: "best.pth"
@@ -55,7 +61,7 @@ train:
 
 model:
   name: "tapformer_cow_dense"
-  window_size: 8
+  window_size: 10
   stride: 4
   corr_levels: 3
   corr_radius: 3
@@ -72,7 +78,7 @@ model:
   cow_max_flow_magnitude_ratio: 1.0
   cow_refine_checkpoint: true
   cow_info_update_mode: "iterative"
-  cow_window_stride: 4
+  cow_window_stride: 5
   cow_window_num_memory_frames: 0
   cow_frontend_type: "base"
   cow_anchor_state_mix: 0.7
