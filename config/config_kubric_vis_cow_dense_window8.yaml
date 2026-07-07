@@ -1,7 +1,7 @@
 # Visualization config for 8-frame cow-dense windowed inference
 
-ckpt_root: "output/train_kubric_cow_dense/20260703_014705/best.pth"
-# ckpt_root: "output/finetune_kubric_cow_dense_reference_window8/20260705_021443/best.pth"
+# ckpt_root: "output/train_kubric_cow_dense/20260703_014705/best.pth"
+ckpt_root: "output/finetune_kubric_cow_dense_reference_window8/20260705_021443/best.pth"
 
 dataset:
   data_root: "data/event_kubric/test"
@@ -63,7 +63,8 @@ eval:
   max_seqs: 5
 
 visualization:
-  output_dir: "output/eval_kubric_cow_dense_window8"
+  # output_dir: "output/eval_kubric_cow_dense_window8"
+  output_dir: "output/eval_kubric_cow_dense_reference_window8"
   enable: true
   video_model: "events"
   use_clear_video: true

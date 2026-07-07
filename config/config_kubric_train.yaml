@@ -34,7 +34,7 @@ train:
   iters: 4
   log_every: 100
   save_every_epochs: 0   # 0 means disable periodic epoch checkpoints
-  save_last: true        # always save final.pth after training
+  save_last: true        # overwrite last.pth after every epoch
   save_best: true        # save best checkpoint during training
   best_metric: "loss"    # loss | coord_loss | visibility_loss | confidence_loss
   best_mode: "min"       # min | max

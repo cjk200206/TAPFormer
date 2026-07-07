@@ -545,21 +545,20 @@ def main():
                 flush=True,
             )
 
-    if save_last:
-        final_epoch = max(start_epoch, epochs) - 1
-        final_ckpt = {
-            "epoch": final_epoch,
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict() if scheduler is not None else None,
-            "config": cfg,
-            "global_step": global_step,
-            "best_metric": best_metric,
-            "best_epoch": best_epoch,
-            "best_metric_name": best_metric_name,
-            "best_mode": best_mode,
-        }
-        torch.save(final_ckpt, run_dir / "final.pth")
+        if save_last:
+            last_ckpt = {
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict() if scheduler is not None else None,
+                "config": cfg,
+                "global_step": global_step,
+                "best_metric": best_metric,
+                "best_epoch": best_epoch,
+                "best_metric_name": best_metric_name,
+                "best_mode": best_mode,
+            }
+            torch.save(last_ckpt, run_dir / "last.pth")
 
     writer.close()
 
