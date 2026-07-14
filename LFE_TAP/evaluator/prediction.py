@@ -5,6 +5,7 @@ import numpy as np
 
 from LFE_TAP.models.tapformer import TAPFormer, posenc
 from LFE_TAP.models.tapformer_cow_dense import TAPFormerCowDense
+from LFE_TAP.models.tapformer_point_warp import TAPFormerPointWarp
 from LFE_TAP.utils.model_utils import get_track_feat, normalize_voxels
 from LFE_TAP.models.embeddings import get_1d_sincos_pos_embed_from_grid
 
@@ -310,6 +311,191 @@ class TAPFormer_online(TAPFormer):
     def load_parameters(self, model):
         # 从训练模型加载参数
         self.load_state_dict(model.state_dict())
+
+
+class TAPFormerPointWarp_online(TAPFormerPointWarp):
+    """Half-window online inference for the sparse point-warp model."""
+
+    def __init__(self, *args, point_online_init_mode="overlap", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.point_online_init_mode = str(point_online_init_mode).lower().strip()
+        if self.point_online_init_mode not in {"overlap", "initializer"}:
+            raise ValueError("point_online_init_mode must be overlap or initializer.")
+
+    @staticmethod
+    def _pad_last(tensor, pad):
+        if pad <= 0:
+            return tensor
+        return torch.cat(
+            [tensor, tensor[:, -1:].expand(-1, pad, *tensor.shape[2:])],
+            dim=1,
+        )
+
+    @staticmethod
+    def _build_window_init(coords, vis, conf, step):
+        overlap_values = [value[:, step:] for value in (coords, vis, conf)]
+        new_values = [
+            value[:, -1:].expand(-1, step, *value.shape[2:])
+            for value in (coords, vis, conf)
+        ]
+        init_values = tuple(
+            torch.cat([overlap, new], dim=1)
+            for overlap, new in zip(overlap_values, new_values)
+        )
+        overlap_mask = torch.ones_like(overlap_values[1], dtype=torch.bool)
+        new_mask = torch.zeros_like(new_values[1], dtype=torch.bool)
+        init_mask = torch.cat([overlap_mask, new_mask], dim=1)
+        return (*init_values, init_mask)
+
+    @torch.no_grad()
+    def forward(
+        self,
+        rgbs,
+        events,
+        queries,
+        iters=6,
+        img_ifnew=None,
+        feat_init=None,
+        interp_shape=(384, 512),
+        is_train=False,
+    ):
+        del feat_init
+        if is_train:
+            raise ValueError("TAPFormerPointWarp_online is inference-only.")
+        if iters is None:
+            raise ValueError(
+                "TAPFormerPointWarp_online.forward requires an explicit iters argument."
+            )
+
+        device = queries.device
+        if not isinstance(rgbs, torch.Tensor):
+            rgbs = torch.as_tensor(np.asarray(rgbs), device=device)
+        if not isinstance(events, torch.Tensor):
+            events = torch.as_tensor(np.asarray(events), device=device)
+        if not torch.is_floating_point(rgbs):
+            rgbs = rgbs.float()
+        if not torch.is_floating_point(events):
+            events = events.float()
+
+        batch, frames, _, height, width = events.shape
+        if batch != 1:
+            raise AssertionError("TAPFormerPointWarp_online expects batch_size == 1.")
+        if frames <= 0:
+            raise ValueError("TAPFormerPointWarp_online requires at least one frame.")
+        if tuple(interp_shape) != self.model_resolution:
+            raise ValueError(
+                f"interp_shape must match point-warp model resolution {self.model_resolution}."
+            )
+        if (
+            (height, width) != self.model_resolution
+            or rgbs.shape[:2] != (batch, frames)
+            or rgbs.shape[-2:] != self.model_resolution
+        ):
+            raise ValueError(
+                f"Expected input resolution {self.model_resolution}, got {(height, width)}."
+            )
+        query_xy = self._validate_queries(queries)
+
+        if img_ifnew is None:
+            img_ifnew = torch.ones(frames, device=device, dtype=rgbs.dtype)
+        else:
+            img_ifnew = torch.as_tensor(img_ifnew, device=device, dtype=rgbs.dtype)
+        if img_ifnew.numel() != frames:
+            raise ValueError("img_ifnew must contain one flag per input frame.")
+
+        window_size = int(self.window_size)
+        if window_size <= 0:
+            raise ValueError("window_size must be positive.")
+        step = max(1, window_size // 2)
+        overlap = window_size - step
+        num_windows = max(
+            1,
+            (max(frames - window_size, 0) + step - 1) // step + 1,
+        )
+        padded_frames = (num_windows - 1) * step + window_size
+        pad = padded_frames - frames
+        rgbs = self._pad_last(rgbs, pad)
+        events = self._pad_last(events, pad)
+        if pad > 0:
+            img_ifnew = torch.cat([img_ifnew, img_ifnew.new_zeros(pad)])
+
+        num_queries = queries.shape[1]
+        coords_out = queries.new_zeros(batch, padded_frames, num_queries, 2)
+        vis_logits_out = queries.new_zeros(batch, padded_frames, num_queries)
+        conf_logits_out = queries.new_zeros(batch, padded_frames, num_queries)
+
+        self._reset_fusion_state()
+        anchor_pyramid = None
+        cached_tail = None
+        prev_coords = prev_vis = prev_conf = None
+        for window_idx in range(num_windows):
+            start = window_idx * step
+            end = start + window_size
+            if window_idx == 0:
+                feature_pyramid = self._prepare_pyramid(
+                    self._encode(
+                        rgbs[:, start:end],
+                        events[:, start:end],
+                        img_ifnew[start:end],
+                    )
+                )
+                anchor_pyramid = [feature[:, :1] for feature in feature_pyramid]
+                init_values = (None, None, None, None)
+            else:
+                new_start = start + overlap
+                new_pyramid = self._prepare_pyramid(
+                    self._encode(
+                        rgbs[:, new_start:end],
+                        events[:, new_start:end],
+                        img_ifnew[new_start:end],
+                    )
+                )
+                if cached_tail is None:
+                    raise RuntimeError("cached_tail is required for point-warp online inference.")
+                feature_pyramid = [
+                    torch.cat([tail, new], dim=1)
+                    for tail, new in zip(cached_tail, new_pyramid)
+                ]
+                if self.point_online_init_mode == "overlap":
+                    init_values = self._build_window_init(
+                        prev_coords,
+                        prev_vis,
+                        prev_conf,
+                        step,
+                    )
+                else:
+                    init_values = (None, None, None, None)
+
+            coord_preds, vis_preds, conf_preds = self._track_from_pyramids(
+                feature_pyramid,
+                anchor_pyramid,
+                query_xy,
+                image_size=self.model_resolution,
+                iters=int(iters),
+                local_anchor=window_idx == 0,
+                coords_init=init_values[0],
+                vis_init=init_values[1],
+                conf_init=init_values[2],
+                init_mask=init_values[3],
+            )
+            prev_coords = coord_preds[-1]
+            prev_vis = vis_preds[-1].unsqueeze(-1)
+            prev_conf = conf_preds[-1].unsqueeze(-1)
+            write_start = start if window_idx == 0 else start + overlap
+            local_start = write_start - start
+            coords_out[:, write_start:end] = prev_coords[:, local_start:]
+            vis_logits_out[:, write_start:end] = prev_vis[:, local_start:, :, 0]
+            conf_logits_out[:, write_start:end] = prev_conf[:, local_start:, :, 0]
+            cached_tail = [
+                feature[:, -overlap:] if overlap else feature[:, :0]
+                for feature in feature_pyramid
+            ]
+
+        return (
+            coords_out[:, :frames],
+            torch.sigmoid(vis_logits_out[:, :frames]),
+            torch.sigmoid(conf_logits_out[:, :frames]),
+        )
 
 
 class TAPFormerCowDense_online(TAPFormerCowDense):

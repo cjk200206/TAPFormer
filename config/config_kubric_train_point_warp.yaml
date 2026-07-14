@@ -1,0 +1,84 @@
+# Core MVP: native TAPFormer fusion + sparse coarse search + point warp refinement
+
+dataset:
+  data_root: "data/event_kubric/train"
+  representation: "time_surfaces_v2_5"
+  seq_len: 12
+  traj_per_sample: 384
+  resample_max_tries: 8
+  height: 384
+  width: 512
+  sample_vis_1st_frame: true
+  choose_long_point: false
+  use_augs: false
+  if_test: false
+  global_first_train_prob: 0.0
+
+train:
+  save_dir: "output/train_kubric_point_warp"
+  epochs: 10
+  batch_size: 1
+  num_workers: 8
+  shuffle: true
+  pin_memory: true
+  drop_last: true
+  lr: 0.0001
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  scheduler:
+    enabled: true
+    type: "cosine"
+    warmup_steps: 3000
+    min_lr: 1.0e-6
+    step_on: "step"
+  iters: 5
+  log_every: 100
+  save_every_epochs: 0
+  save_last: true
+  save_best: true
+  best_metric: "loss"
+  best_mode: "min"
+  best_filename: "best.pth"
+  precision: "bf16"
+  seed: 0
+  pretrained: null
+  pretrained_strict: false
+  resume: null
+
+model:
+  name: "tapformer_point_warp"
+  window_size: 12
+  stride: 4
+  corr_levels: 3
+  corr_radius: 3
+  hidden_size: 384
+  space_depth: 3
+  time_depth: 3
+  point_state_dim: 128
+  point_warp_dim: 256
+  point_corr_levels: 3
+  point_patch_radius: 2
+  point_initializer_stride: 16
+  point_cost_base_stride: 8
+  point_cost_levels: 3
+  point_cost_radius: 3
+  point_cost_dim: 256
+  point_initializer_temperature: 20.0
+  point_initializer_radius: 5
+  point_initializer_chunk_size: 64
+  point_detach_coords: true
+  point_limit_update: false
+  point_max_update_ratio: 0.15
+  point_max_magnitude_ratio: 1.0
+  point_support_mode: "none"
+
+loss:
+  coord_weight: 0.05
+  invisible_coord_weight: 0.01
+  visibility_weight: 1.0
+  confidence_weight: 1.0
+  iter_gamma: 0.8
+  confidence_threshold: 12.0
+  add_huber_loss: true
+  huber_delta: 6.0
+  loss_only_for_visible: true

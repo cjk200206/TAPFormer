@@ -6,11 +6,17 @@ import torch
 import yaml
 
 from LFE_TAP.evaluator.evaluation_pred import CowTrackerEvaluationPredictor, EvaluationPredictor
-from LFE_TAP.evaluator.prediction import TAPFormerCowDense_online, TAPFormerCowDense_windowed, TAPFormer_online
+from LFE_TAP.evaluator.prediction import (
+    TAPFormerCowDense_online,
+    TAPFormerCowDense_windowed,
+    TAPFormerPointWarp_online,
+    TAPFormer_online,
+)
 
 
 _TAPFORMER_MODEL_NAMES = {"tapformer", "tapformer_online"}
 _COW_DENSE_MODEL_NAMES = {"tapformer_cow_dense", "tapformer_cow_dense_online", "cow_dense"}
+_POINT_WARP_MODEL_NAMES = {"tapformer_point_warp", "point_warp"}
 _TAPFORMER_BACKEND_NAMES = {"tapformer", "tapformer_family", "internal"}
 _COWTRACKER_BACKEND_NAMES = {"cowtracker"}
 _FREEZE_CONFIG_KEYS = {
@@ -60,6 +66,37 @@ def _get_cow_model_kwargs(model_cfg):
         "cow_frontend_type": str(model_cfg.get("cow_frontend_type", "base")),
         "cow_anchor_state_mix": float(model_cfg.get("cow_anchor_state_mix", 0.7)),
         "cow_anchor_skip_mix": float(model_cfg.get("cow_anchor_skip_mix", 0.7)),
+    }
+
+
+def _get_point_warp_model_kwargs(model_cfg):
+    return {
+        "point_state_dim": int(model_cfg.get("point_state_dim", 128)),
+        "point_warp_dim": int(model_cfg.get("point_warp_dim", 256)),
+        "point_corr_levels": int(
+            model_cfg.get("point_corr_levels", model_cfg.get("corr_levels", 3))
+        ),
+        "point_patch_radius": int(model_cfg.get("point_patch_radius", 2)),
+        "point_cost_base_stride": int(model_cfg.get("point_cost_base_stride", 8)),
+        "point_cost_levels": int(model_cfg.get("point_cost_levels", 3)),
+        "point_cost_radius": int(model_cfg.get("point_cost_radius", 3)),
+        "point_cost_dim": int(model_cfg.get("point_cost_dim", 256)),
+        "point_initializer_stride": int(model_cfg.get("point_initializer_stride", 16)),
+        "point_initializer_temperature": float(
+            model_cfg.get("point_initializer_temperature", 20.0)
+        ),
+        "point_initializer_radius": int(model_cfg.get("point_initializer_radius", 5)),
+        "point_initializer_chunk_size": int(
+            model_cfg.get("point_initializer_chunk_size", 64)
+        ),
+        "point_detach_coords": bool(model_cfg.get("point_detach_coords", True)),
+        "point_limit_update": bool(model_cfg.get("point_limit_update", True)),
+        "point_max_update_ratio": float(model_cfg.get("point_max_update_ratio", 0.15)),
+        "point_max_magnitude_ratio": float(
+            model_cfg.get("point_max_magnitude_ratio", 1.0)
+        ),
+        "point_support_mode": str(model_cfg.get("point_support_mode", "none")),
+        "point_online_init_mode": str(model_cfg.get("point_online_init_mode", "overlap")),
     }
 
 
@@ -224,9 +261,19 @@ def build_eval_model_from_config(model_cfg, inference_mode="online"):
             return TAPFormerCowDense_windowed(**cow_kwargs)
         return TAPFormerCowDense_online(**cow_kwargs)
 
+    if model_name in _POINT_WARP_MODEL_NAMES:
+        if inference_mode != "online":
+            raise ValueError(
+                "Point-warp only supports inference_mode=online in the shared factory."
+            )
+        point_kwargs = _get_point_warp_model_kwargs(model_cfg)
+        point_kwargs.update(common_kwargs)
+        return TAPFormerPointWarp_online(**point_kwargs)
+
     raise ValueError(
         f"Unsupported model_name={model_name}. "
-        "Use one of: tapformer, tapformer_online, tapformer_cow_dense, tapformer_cow_dense_online, cow_dense."
+        "Use one of: tapformer, tapformer_online, tapformer_cow_dense, "
+        "tapformer_cow_dense_online, cow_dense, tapformer_point_warp, point_warp."
     )
 
 

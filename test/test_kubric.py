@@ -22,9 +22,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from LFE_TAP.datasets.kubric_movif_dataset import KubricMovifDataset_etap
 from LFE_TAP.evaluator.evaluation_pred import EvaluationPredictor
-from LFE_TAP.evaluator.prediction import TAPFormerCowDense_online, TAPFormerCowDense_windowed, TAPFormer_online
+from LFE_TAP.evaluator.prediction import (
+    TAPFormerCowDense_online,
+    TAPFormerCowDense_windowed,
+    TAPFormerPointWarp_online,
+    TAPFormer_online,
+)
 from LFE_TAP.models.tapformer import TAPFormer
 from LFE_TAP.models.tapformer_cow_dense import TAPFormerCowDense
+from LFE_TAP.models.tapformer_point_warp import TAPFormerPointWarp
 from LFE_TAP.utils.model_utils import get_points_on_a_grid
 from LFE_TAP.utils.visualizer import Visualizer
 
@@ -190,6 +196,36 @@ def build_model_from_config(model_cfg, inference_mode="online"):
         space_depth=int(model_cfg.get("space_depth", 3)),
         time_depth=int(model_cfg.get("time_depth", 3)),
     )
+    if model_name in {"tapformer_point_warp", "point_warp"}:
+        if inference_mode == "offline":
+            point_warp_cls = TAPFormerPointWarp
+        elif inference_mode == "online":
+            point_warp_cls = TAPFormerPointWarp_online
+        else:
+            raise ValueError("tapformer_point_warp supports online or offline inference.")
+        return point_warp_cls(
+            point_state_dim=int(model_cfg.get("point_state_dim", 128)),
+            point_warp_dim=int(model_cfg.get("point_warp_dim", 256)),
+            point_corr_levels=int(
+                model_cfg.get("point_corr_levels", model_cfg.get("corr_levels", 3))
+            ),
+            point_patch_radius=int(model_cfg.get("point_patch_radius", 2)),
+            point_cost_base_stride=int(model_cfg.get("point_cost_base_stride", 8)),
+            point_cost_levels=int(model_cfg.get("point_cost_levels", 3)),
+            point_cost_radius=int(model_cfg.get("point_cost_radius", 3)),
+            point_cost_dim=int(model_cfg.get("point_cost_dim", 256)),
+            point_initializer_stride=int(model_cfg.get("point_initializer_stride", 16)),
+            point_initializer_temperature=float(model_cfg.get("point_initializer_temperature", 20.0)),
+            point_initializer_radius=int(model_cfg.get("point_initializer_radius", 5)),
+            point_initializer_chunk_size=int(model_cfg.get("point_initializer_chunk_size", 64)),
+            point_detach_coords=bool(model_cfg.get("point_detach_coords", True)),
+            point_limit_update=bool(model_cfg.get("point_limit_update", True)),
+            point_max_update_ratio=float(model_cfg.get("point_max_update_ratio", 0.15)),
+            point_max_magnitude_ratio=float(model_cfg.get("point_max_magnitude_ratio", 1.0)),
+            point_support_mode=str(model_cfg.get("point_support_mode", "none")),
+            point_online_init_mode=str(model_cfg.get("point_online_init_mode", "overlap")),
+            **common_kwargs,
+        )
     if model_name in {"tapformer_cow_dense", "cow_dense"}:
         cow_kwargs = dict(
             cow_refine_model=str(model_cfg.get("cow_refine_model", "vits")),
@@ -267,7 +303,18 @@ def main():
     state_dict = torch.load(ckpt_root, map_location=DEFAULT_DEVICE)
     if "model" in state_dict:
         state_dict = state_dict["model"]
-    model.load_state_dict(state_dict, strict=False)
+    checkpoint_model_name = str(model_cfg.get("name", "")).lower().strip()
+    if checkpoint_model_name in {"tapformer_point_warp", "point_warp"}:
+        target_state = model.state_dict()
+        compatible_state = {
+            key: value
+            for key, value in state_dict.items()
+            if key in target_state and target_state[key].shape == value.shape
+        }
+        model.load_state_dict(compatible_state, strict=False)
+        print(f"Point-warp checkpoint load: loaded={len(compatible_state)}")
+    else:
+        model.load_state_dict(state_dict, strict=False)
     model.eval()
 
     predictor = EvaluationPredictor(
@@ -320,7 +367,9 @@ def main():
     online_dual_merge_export = bool(vis_cfg.get("online_dual_merge_export", False))
     video_start = max(0, int(vis_cfg.get("video_start", 0)))
     video_length = int(vis_cfg.get("video_length", 0))
-    is_cow_dense = str(model_cfg.get("name", "")).lower().strip() in {"tapformer_cow_dense", "cow_dense"}
+    model_name = str(model_cfg.get("name", "")).lower().strip()
+    is_cow_dense = model_name in {"tapformer_cow_dense", "cow_dense"}
+    requires_frame0_queries = is_cow_dense or model_name in {"tapformer_point_warp", "point_warp"}
     if query_mode not in {"gt", "grid"}:
         raise ValueError(f"Unsupported visualization.query_mode={query_mode}. Use gt or grid.")
     if query_mode == "grid" and query_grid_size <= 0:
@@ -374,7 +423,7 @@ def main():
             visibility,
             valid,
             video.shape[-2:],
-            is_cow_dense,
+            requires_frame0_queries,
             query_mode,
             query_grid_size,
         )

@@ -26,6 +26,7 @@ from LFE_TAP.datasets.kubric_movif_dataset import KubricMovifDataset_etap
 from LFE_TAP.models.tapformer import TAPFormer
 from LFE_TAP.models.tapformer_ablation import TAPFormerAblation
 from LFE_TAP.models.tapformer_cow_dense import TAPFormerCowDense
+from LFE_TAP.models.tapformer_point_warp import TAPFormerPointWarp
 from LFE_TAP.models.losses import TAPFormerLoss
 from LFE_TAP.utils.dataset_utils import FrameEventData
 
@@ -147,9 +148,32 @@ def build_model_from_config(model_cfg):
             cow_anchor_skip_mix=float(model_cfg.get("cow_anchor_skip_mix", 0.7)),
             **common_kwargs,
         )
+    if model_name in {"tapformer_point_warp", "point_warp"}:
+        return TAPFormerPointWarp(
+            point_state_dim=int(model_cfg.get("point_state_dim", 128)),
+            point_warp_dim=int(model_cfg.get("point_warp_dim", 256)),
+            point_corr_levels=int(
+                model_cfg.get("point_corr_levels", model_cfg.get("corr_levels", 3))
+            ),
+            point_patch_radius=int(model_cfg.get("point_patch_radius", 2)),
+            point_cost_base_stride=int(model_cfg.get("point_cost_base_stride", 8)),
+            point_cost_levels=int(model_cfg.get("point_cost_levels", 3)),
+            point_cost_radius=int(model_cfg.get("point_cost_radius", 3)),
+            point_cost_dim=int(model_cfg.get("point_cost_dim", 256)),
+            point_initializer_stride=int(model_cfg.get("point_initializer_stride", 16)),
+            point_initializer_temperature=float(model_cfg.get("point_initializer_temperature", 20.0)),
+            point_initializer_radius=int(model_cfg.get("point_initializer_radius", 5)),
+            point_initializer_chunk_size=int(model_cfg.get("point_initializer_chunk_size", 64)),
+            point_detach_coords=bool(model_cfg.get("point_detach_coords", True)),
+            point_limit_update=bool(model_cfg.get("point_limit_update", True)),
+            point_max_update_ratio=float(model_cfg.get("point_max_update_ratio", 0.15)),
+            point_max_magnitude_ratio=float(model_cfg.get("point_max_magnitude_ratio", 1.0)),
+            point_support_mode=str(model_cfg.get("point_support_mode", "none")),
+            **common_kwargs,
+        )
     raise ValueError(
         f"Unsupported model.name={model_name}. "
-        "Use one of: tapformer, tapformer_ablation, tapformer_cow_dense."
+        "Use one of: tapformer, tapformer_ablation, tapformer_cow_dense, tapformer_point_warp."
     )
 
 
@@ -169,6 +193,47 @@ def normalize_state_dict_keys(state_dict):
     if all(k.startswith("module.") for k in state_dict.keys()):
         return {k[len("module."):]: v for k, v in state_dict.items()}
     return state_dict
+
+
+def load_point_warp_pretrained(model, source_state):
+    """Load compatible fusion/attention weights without changing legacy loaders."""
+    target_state = model.state_dict()
+    attention_prefixes = (
+        "time_blocks.",
+        "space_virtual_blocks.",
+        "space_point2virtual_blocks.",
+        "space_virtual2point_blocks.",
+        "virual_tracks",
+    )
+    compatible = {}
+    shape_mismatch = []
+    for source_key, value in source_state.items():
+        target_key = source_key
+        if source_key.startswith("updateformer2."):
+            suffix = source_key[len("updateformer2.") :]
+            if not suffix.startswith(attention_prefixes):
+                continue
+            target_key = f"point_head.updateformer2.{suffix}"
+        elif not source_key.startswith("fusion_block.") and not source_key.startswith(
+            ("initializer.", "point_head.")
+        ):
+            continue
+
+        if target_key not in target_state:
+            continue
+        if target_state[target_key].shape != value.shape:
+            shape_mismatch.append(target_key)
+            continue
+        compatible[target_key] = value
+
+    incompatible = model.load_state_dict(compatible, strict=False)
+    print(
+        "Point-warp pretrained load: "
+        f"loaded={len(compatible)}, missing={len(incompatible.missing_keys)}, "
+        f"shape_mismatch={len(shape_mismatch)}",
+        flush=True,
+    )
+    return incompatible
 
 
 def metric_sign(mode: str):
@@ -248,9 +313,11 @@ def main():
         and int(dataset_cfg.get("num_memory_frames", 0)) == 0
     )
     model_name = str(model_cfg.get("name", "tapformer")).lower().strip()
-    if global_first_train_prob > 0.0 and model_name not in {"tapformer_cow_dense", "cow_dense"}:
+    is_point_warp = model_name in {"tapformer_point_warp", "point_warp"}
+    reference_model_names = {"tapformer_cow_dense", "cow_dense", "tapformer_point_warp", "point_warp"}
+    if global_first_train_prob > 0.0 and model_name not in reference_model_names:
         raise ValueError(
-            "dataset.global_first_train_prob > 0 only supports model.name tapformer_cow_dense / cow_dense."
+            "dataset.global_first_train_prob > 0 only supports CowDense or PointWarp models."
         )
 
     batch_size = int(train_cfg.get("batch_size", 1))
@@ -351,7 +418,10 @@ def main():
     if pretrained_path:
         ckpt = torch.load(pretrained_path, map_location=device)
         model_state = normalize_state_dict_keys(extract_state_dict(ckpt))
-        incompatible = model.load_state_dict(model_state, strict=pretrained_strict)
+        if model_name in {"tapformer_point_warp", "point_warp"} and not pretrained_strict:
+            incompatible = load_point_warp_pretrained(model, model_state)
+        else:
+            incompatible = model.load_state_dict(model_state, strict=pretrained_strict)
         print(
             f"Loaded pretrained weights from {pretrained_path} "
             f"(strict={pretrained_strict}, missing={len(incompatible.missing_keys)}, "
