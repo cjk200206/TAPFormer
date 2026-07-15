@@ -1,8 +1,8 @@
 # Configuration file for Kubric/ETAP visualization
 
-ckpt_root: "output/train_kubric/best.pth"
+# ckpt_root: "output/train_kubric/best.pth"
 # ckpt_root: "output/train_kubric/epoch_009.pth"
-# ckpt_root: "output/tapformer.pth"
+ckpt_root: "output/tapformer.pth"
 
 dataset:
   data_root: "data/event_kubric/test"
@@ -50,7 +50,7 @@ visualization:
   video_model: "events"   # events | rgb
   use_clear_video: true
   use_gt_as_prediction: false
-  query_mode: "gt"  # gt | grid
+  query_mode: "grid"  # gt | grid
   grid_size: 32
   visibility_threshold: 0.8
   fps: 20

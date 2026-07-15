@@ -58,6 +58,12 @@ model:
   point_warp_dim: 256
   point_corr_levels: 3
   point_patch_radius: 2
+  point_local_corr_radius: 3
+  point_coarse_iters: 2
+  point_refine_iters: 3
+  point_refine_use_local_evidence: true
+  point_refine_detach_local_evidence: true
+  point_use_global_init: false
   point_initializer_stride: 16
   point_cost_base_stride: 8
   point_cost_levels: 3

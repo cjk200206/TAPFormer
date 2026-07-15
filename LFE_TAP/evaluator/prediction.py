@@ -134,8 +134,12 @@ class TAPFormer_online(TAPFormer):
                 padding_tensor = events_seq[:, :, -1:, :].expand(B, 1, pad, C * H * W)
                 events_seq = torch.cat([events_seq, padding_tensor], dim=2)
                 if img_ifnew is not None:
-                    padding_numpy = np.ones(pad)
-                    img_ifnew_seq = np.concatenate((img_ifnew_seq, padding_numpy), axis=0)
+                    if isinstance(img_ifnew_seq, torch.Tensor):
+                        padding = img_ifnew_seq.new_ones(pad)
+                        img_ifnew_seq = torch.cat([img_ifnew_seq, padding], dim=0)
+                    else:
+                        padding_numpy = np.ones(pad)
+                        img_ifnew_seq = np.concatenate((img_ifnew_seq, padding_numpy), axis=0)
                 # rgbs_seq = rgbs_seq.reshape(B, -1, C_img, H, W)
                 # events_seq = events_seq.reshape(B, -1, C, H, W)
             
@@ -319,8 +323,8 @@ class TAPFormerPointWarp_online(TAPFormerPointWarp):
     def __init__(self, *args, point_online_init_mode="overlap", **kwargs):
         super().__init__(*args, **kwargs)
         self.point_online_init_mode = str(point_online_init_mode).lower().strip()
-        if self.point_online_init_mode not in {"overlap", "initializer"}:
-            raise ValueError("point_online_init_mode must be overlap or initializer.")
+        if self.point_online_init_mode != "overlap":
+            raise ValueError("point_online_init_mode must be overlap for local-update point-warp.")
 
     @staticmethod
     def _pad_last(tensor, pad):
@@ -342,10 +346,7 @@ class TAPFormerPointWarp_online(TAPFormerPointWarp):
             torch.cat([overlap, new], dim=1)
             for overlap, new in zip(overlap_values, new_values)
         )
-        overlap_mask = torch.ones_like(overlap_values[1], dtype=torch.bool)
-        new_mask = torch.zeros_like(new_values[1], dtype=torch.bool)
-        init_mask = torch.cat([overlap_mask, new_mask], dim=1)
-        return (*init_values, init_mask)
+        return (*init_values, None)
 
     @torch.no_grad()
     def forward(
@@ -456,15 +457,12 @@ class TAPFormerPointWarp_online(TAPFormerPointWarp):
                     torch.cat([tail, new], dim=1)
                     for tail, new in zip(cached_tail, new_pyramid)
                 ]
-                if self.point_online_init_mode == "overlap":
-                    init_values = self._build_window_init(
-                        prev_coords,
-                        prev_vis,
-                        prev_conf,
-                        step,
-                    )
-                else:
-                    init_values = (None, None, None, None)
+                init_values = self._build_window_init(
+                    prev_coords,
+                    prev_vis,
+                    prev_conf,
+                    step,
+                )
 
             coord_preds, vis_preds, conf_preds = self._track_from_pyramids(
                 feature_pyramid,
@@ -481,11 +479,9 @@ class TAPFormerPointWarp_online(TAPFormerPointWarp):
             prev_coords = coord_preds[-1]
             prev_vis = vis_preds[-1].unsqueeze(-1)
             prev_conf = conf_preds[-1].unsqueeze(-1)
-            write_start = start if window_idx == 0 else start + overlap
-            local_start = write_start - start
-            coords_out[:, write_start:end] = prev_coords[:, local_start:]
-            vis_logits_out[:, write_start:end] = prev_vis[:, local_start:, :, 0]
-            conf_logits_out[:, write_start:end] = prev_conf[:, local_start:, :, 0]
+            coords_out[:, start:end] = prev_coords
+            vis_logits_out[:, start:end] = prev_vis[..., 0]
+            conf_logits_out[:, start:end] = prev_conf[..., 0]
             cached_tail = [
                 feature[:, -overlap:] if overlap else feature[:, :0]
                 for feature in feature_pyramid

@@ -156,6 +156,12 @@ def build_model_from_config(model_cfg):
                 model_cfg.get("point_corr_levels", model_cfg.get("corr_levels", 3))
             ),
             point_patch_radius=int(model_cfg.get("point_patch_radius", 2)),
+            point_local_corr_radius=int(model_cfg.get("point_local_corr_radius", 3)),
+            point_coarse_iters=model_cfg.get("point_coarse_iters", None),
+            point_refine_iters=model_cfg.get("point_refine_iters", None),
+            point_refine_use_local_evidence=bool(model_cfg.get("point_refine_use_local_evidence", True)),
+            point_refine_detach_local_evidence=bool(model_cfg.get("point_refine_detach_local_evidence", True)),
+            point_use_global_init=bool(model_cfg.get("point_use_global_init", False)),
             point_cost_base_stride=int(model_cfg.get("point_cost_base_stride", 8)),
             point_cost_levels=int(model_cfg.get("point_cost_levels", 3)),
             point_cost_radius=int(model_cfg.get("point_cost_radius", 3)),
