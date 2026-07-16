@@ -1,0 +1,7 @@
+backend: "cotracker"
+repo_root: "../../co-tracker"
+checkpoint: "../../co-tracker/checkpoints/scaled_online.pth"
+mode: "online"
+window_len: 16
+v2: false
+backward_tracking: false

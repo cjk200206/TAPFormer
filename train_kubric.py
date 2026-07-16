@@ -499,16 +499,22 @@ def main():
 
             use_amp = (autocast_dtype is not None and device.type == "cuda")
             with torch.autocast(device_type=device.type, dtype=autocast_dtype if autocast_dtype is not None else torch.float32, enabled=use_amp):
+                model_kwargs = dict(
+                    iters=iters,
+                    img_ifnew=sample.img_ifnew[0],
+                    is_train=True,
+                )
+                if model_name in reference_model_names:
+                    model_kwargs.update(
+                        reference_rgbs=sample.reference_video,
+                        reference_events=sample.reference_events,
+                        reference_only_train=reference_only_train,
+                    )
                 _, _, _, train_data = model(
                     sample.video,
                     sample.events,
                     queries,
-                    iters=iters,
-                    img_ifnew=sample.img_ifnew[0],
-                    reference_rgbs=sample.reference_video,
-                    reference_events=sample.reference_events,
-                    reference_only_train=reference_only_train,
-                    is_train=True,
+                    **model_kwargs,
                 )
                 loss_dict = criterion(
                     train_data=train_data,

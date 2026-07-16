@@ -5,7 +5,11 @@ from pathlib import Path
 import torch
 import yaml
 
-from LFE_TAP.evaluator.evaluation_pred import CowTrackerEvaluationPredictor, EvaluationPredictor
+from LFE_TAP.evaluator.evaluation_pred import (
+    CowTrackerEvaluationPredictor,
+    EvaluationPredictor,
+    ExternalCoTrackerEvaluationPredictor,
+)
 from LFE_TAP.evaluator.prediction import (
     TAPFormerCowDense_online,
     TAPFormerCowDense_windowed,
@@ -19,6 +23,7 @@ _COW_DENSE_MODEL_NAMES = {"tapformer_cow_dense", "tapformer_cow_dense_online", "
 _POINT_WARP_MODEL_NAMES = {"tapformer_point_warp", "point_warp"}
 _TAPFORMER_BACKEND_NAMES = {"tapformer", "tapformer_family", "internal"}
 _COWTRACKER_BACKEND_NAMES = {"cowtracker"}
+_COTRACKER_BACKEND_NAMES = {"cotracker", "co-tracker", "co_tracker"}
 _FREEZE_CONFIG_KEYS = {
     "freeze_vggt",
     "freeze_aggregator",
@@ -126,9 +131,11 @@ def _normalize_eval_backend(backend_name):
         return "tapformer_family"
     if backend in _COWTRACKER_BACKEND_NAMES:
         return "cowtracker"
+    if backend in _COTRACKER_BACKEND_NAMES:
+        return "cotracker"
     raise ValueError(
         f"Unsupported eval_model.backend={backend_name}. "
-        "Use one of: tapformer_family, cowtracker."
+        "Use one of: tapformer_family, cowtracker, cotracker."
     )
 
 
@@ -314,6 +321,17 @@ def _import_cowtracker_modules(repo_root):
     }
 
 
+def _import_cotracker_modules(repo_root):
+    repo_root = str(repo_root)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    predictor_module = importlib.import_module("cotracker.predictor")
+    return {
+        "CoTrackerPredictor": predictor_module.CoTrackerPredictor,
+        "CoTrackerOnlinePredictor": predictor_module.CoTrackerOnlinePredictor,
+    }
+
+
 def _build_cowtracker_model(ckpt, cowtracker_cfg, bridge_cfg, repo_root, device, modules):
     if _model_uses_vggt(cowtracker_cfg):
         _ensure_vggt_available(repo_root)
@@ -450,10 +468,59 @@ def _build_cowtracker_predictor(eval_cfg):
     return predictor
 
 
+def _build_cotracker_predictor(eval_cfg):
+    eval_model_cfg = _get_eval_model_config(eval_cfg)
+    external_config = eval_model_cfg.get("external_config")
+    if not external_config:
+        raise ValueError("eval_model.external_config is required when eval_model.backend=cotracker.")
+
+    main_base_dir = _get_config_base_dir(eval_cfg)
+    bridge_path = _resolve_path(external_config, main_base_dir)
+    bridge_cfg = _load_yaml_config(bridge_path)
+    bridge_backend = _normalize_eval_backend(bridge_cfg.get("backend", "cotracker"))
+    if bridge_backend != "cotracker":
+        raise ValueError(f"Unsupported external backend in {bridge_path}: {bridge_backend}")
+
+    bridge_base_dir = bridge_path.parent
+    repo_root = _resolve_path(bridge_cfg["repo_root"], bridge_base_dir)
+    checkpoint_path = _resolve_path(bridge_cfg["checkpoint"], bridge_base_dir)
+    mode = str(bridge_cfg.get("mode", "online")).lower().strip()
+    if mode not in {"online", "offline"}:
+        raise ValueError(f"Unsupported CoTracker mode={mode}. Use one of: online, offline.")
+
+    device = _resolve_device(bridge_cfg.get("device"))
+    modules = _import_cotracker_modules(repo_root)
+    window_len_default = 16 if mode == "online" else 60
+    model_kwargs = {
+        "checkpoint": str(checkpoint_path),
+        "v2": bool(bridge_cfg.get("v2", False)),
+        "window_len": int(bridge_cfg.get("window_len", window_len_default)),
+    }
+    if mode == "online":
+        cotracker_model = modules["CoTrackerOnlinePredictor"](**model_kwargs)
+    else:
+        model_kwargs["offline"] = True
+        cotracker_model = modules["CoTrackerPredictor"](**model_kwargs)
+
+    cotracker_model = cotracker_model.to(device)
+    cotracker_model.eval()
+    for param in cotracker_model.parameters():
+        param.requires_grad = False
+
+    return ExternalCoTrackerEvaluationPredictor(
+        model=cotracker_model,
+        mode=mode,
+        device=device,
+        backward_tracking=bool(bridge_cfg.get("backward_tracking", False)),
+    )
+
+
 def build_eval_predictor_from_config(eval_cfg, **predictor_kwargs):
     backend = _get_eval_model_config(eval_cfg)["backend"]
     if backend == "tapformer_family":
         return _build_tapformer_predictor(eval_cfg, predictor_kwargs)
     if backend == "cowtracker":
         return _build_cowtracker_predictor(eval_cfg)
+    if backend == "cotracker":
+        return _build_cotracker_predictor(eval_cfg)
     raise ValueError(f"Unsupported eval backend: {backend}")

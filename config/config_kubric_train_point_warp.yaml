@@ -3,8 +3,8 @@
 dataset:
   data_root: "data/event_kubric/train"
   representation: "time_surfaces_v2_5"
-  seq_len: 12
-  traj_per_sample: 384
+  seq_len: 24
+  traj_per_sample: 128
   resample_max_tries: 8
   height: 384
   width: 512
@@ -22,7 +22,7 @@ train:
   shuffle: true
   pin_memory: true
   drop_last: true
-  lr: 0.0001
+  lr: 0.0005
   weight_decay: 0.0001
   grad_clip_norm: 1.0
   scheduler:

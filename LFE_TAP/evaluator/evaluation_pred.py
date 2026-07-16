@@ -285,6 +285,119 @@ class EvaluationPredictor(torch.nn.Module):
         return traj_e_pind[..., :2], vis_e_pind, conf_e_pind
 
 
+class ExternalCoTrackerEvaluationPredictor(torch.nn.Module):
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        mode: str = "online",
+        device: Optional[torch.device] = None,
+        backward_tracking: bool = False,
+    ) -> None:
+        super().__init__()
+        self.model = model
+        self.mode = str(mode).lower().strip()
+        if self.mode not in {"online", "offline"}:
+            raise ValueError("External CoTracker mode must be one of: online, offline.")
+        self.device = device or next(model.parameters()).device
+        self.backward_tracking = bool(backward_tracking)
+        self.model.eval()
+
+    def _to_device_tensor(self, value):
+        if isinstance(value, torch.Tensor):
+            tensor = value.to(self.device)
+        else:
+            tensor = torch.as_tensor(np.asarray(value), device=self.device)
+        if not torch.is_floating_point(tensor):
+            tensor = tensor.float()
+        return tensor
+
+    def _prepare_inputs(self, video, queries):
+        if queries is None:
+            raise ValueError("ExternalCoTrackerEvaluationPredictor requires explicit query points.")
+        video = self._to_device_tensor(video)
+        queries = self._to_device_tensor(queries)
+        if video.ndim != 5:
+            raise ValueError(f"CoTracker expects video with shape [B,T,C,H,W], got {tuple(video.shape)}")
+        if queries.ndim != 3 or queries.shape[-1] != 3:
+            raise ValueError(f"CoTracker expects queries with shape [B,N,3], got {tuple(queries.shape)}")
+        if video.shape[2] != 3:
+            raise ValueError(f"CoTracker expects RGB video with 3 channels, got C={video.shape[2]}")
+        return video, queries
+
+    @staticmethod
+    def _anchor_queries(pred_track, pred_vis, queries):
+        query_xy = queries[..., 1:3]
+        query_frames = torch.round(queries[..., 0]).to(torch.long)
+        point_ids = torch.arange(pred_track.shape[2], device=pred_track.device)
+        for batch_idx in range(pred_track.shape[0]):
+            frame_ids = query_frames[batch_idx].clamp(0, pred_track.shape[1] - 1)
+            pred_track[batch_idx, frame_ids, point_ids] = query_xy[batch_idx]
+            pred_vis[batch_idx, frame_ids, point_ids] = True
+
+    @staticmethod
+    def _match_time_length(pred_track, pred_vis, target_len):
+        pred_len = pred_track.shape[1]
+        if pred_len == target_len:
+            return pred_track, pred_vis
+        if pred_len > target_len:
+            return pred_track[:, :target_len], pred_vis[:, :target_len]
+        if pred_len <= 0:
+            raise ValueError("CoTracker returned an empty prediction.")
+        pad_len = target_len - pred_len
+        track_pad = pred_track[:, -1:].expand(-1, pad_len, -1, -1)
+        vis_pad = pred_vis[:, -1:].expand(-1, pad_len, -1)
+        return torch.cat([pred_track, track_pad], dim=1), torch.cat([pred_vis, vis_pad], dim=1)
+
+    def _run_offline(self, video, queries):
+        return self.model(
+            video,
+            queries=queries,
+            grid_size=0,
+            backward_tracking=self.backward_tracking,
+        )
+
+    def _run_online(self, video, queries):
+        self.model(
+            video,
+            is_first_step=True,
+            queries=queries,
+            grid_size=0,
+            add_support_grid=False,
+        )
+        step = int(getattr(self.model, "step", 0))
+        if step <= 0:
+            raise ValueError("CoTracker online predictor must expose a positive `step`.")
+
+        target_len = video.shape[1]
+        last_tracks, last_visibility = None, None
+        for start in range(0, max(target_len - step, 1), step):
+            video_chunk = video[:, start : start + step * 2]
+            last_tracks, last_visibility = self.model(
+                video_chunk,
+                is_first_step=False,
+                grid_size=0,
+                add_support_grid=False,
+            )
+
+        if last_tracks is None or last_visibility is None:
+            raise ValueError("CoTracker online predictor did not return predictions.")
+        return self._match_time_length(last_tracks, last_visibility, target_len)
+
+    def forward(self, video, events, queries=None, img_ifnew=None, return_merge_variants=False):
+        del events, img_ifnew, return_merge_variants
+        video, queries = self._prepare_inputs(video, queries)
+        with torch.no_grad():
+            if self.mode == "online":
+                pred_track, pred_vis = self._run_online(video, queries)
+            else:
+                pred_track, pred_vis = self._run_offline(video, queries)
+
+        pred_vis = pred_vis.bool()
+        self._anchor_queries(pred_track, pred_vis, queries)
+        pred_conf = pred_vis.float()
+        return pred_track, pred_vis, pred_conf
+
+
 class CowTrackerEvaluationPredictor(torch.nn.Module):
     SAFE_INFER_SHAPE_DIVISOR = 112
 

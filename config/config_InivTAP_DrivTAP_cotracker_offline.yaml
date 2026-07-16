@@ -1,0 +1,38 @@
+dataset_dir: "data/TAPFormer_Dataset"
+
+eval_datasets:
+  - ["ID_Fast_Fruit", "InivTAP"]
+  - ["ID_Dark_Fruit", "InivTAP"]
+  - ["ID_Fast_Hand", "InivTAP"]
+  - ["ID_OverExp_Fruit", "InivTAP"]
+  - ["ID_OverExp_Fruit2", "InivTAP"]
+  - ["ID_Dynamic_Robot", "InivTAP"]
+  - ["OD_Dynamic", "InivTAP"]
+  - ["OD_Static", "InivTAP"]
+  - ["OD_Basketball", "InivTAP"]
+  - ["Day_Tunnel", "DrivTAP"]
+  - ["Day_Bridge", "DrivTAP"]
+  - ["Day_Fast", "DrivTAP"]
+  - ["Night_Road", "DrivTAP"]
+  - ["Night_Fast", "DrivTAP"]
+
+representation: "time_surfaces_v2_5"
+eval_resolution: [448, 560]
+
+eval_model:
+  backend: "cotracker"
+  external_config: "eval_model_cotracker_offline.yaml"
+
+grid_size: 0
+n_iters: 5
+dt: auto
+drivtap_gt_mode: downsample_even
+
+visualization:
+  enable: false
+  fps: 20
+
+output:
+  save_results: false
+  save_trajectory: false
+  base_dir: "output/eval_aedat4_subseq_cotracker_offline"
