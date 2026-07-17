@@ -300,6 +300,86 @@ def get_current_lr(optimizer) -> float:
     return float(optimizer.param_groups[0]["lr"])
 
 
+def build_kubric_dataset(dataset_cfg, root_key="data_root", overrides=None):
+    cfg = dict(dataset_cfg)
+    if overrides:
+        cfg.update(overrides)
+    root_dir = cfg.get(root_key)
+    if not root_dir:
+        raise ValueError(f"dataset.{root_key} must be set.")
+
+    return KubricMovifDataset_etap(
+        root_dir=root_dir,
+        representation=cfg.get("representation", "time_surfaces_v2_5"),
+        crop_size=(int(cfg.get("height", 384)), int(cfg.get("width", 512))),
+        seq_len=int(cfg.get("seq_len", 24)),
+        traj_per_sample=int(cfg.get("traj_per_sample", 128)),
+        sample_vis_1st_frame=bool(cfg.get("sample_vis_1st_frame", False)),
+        choose_long_point=bool(cfg.get("choose_long_point", False)),
+        use_augs=bool(cfg.get("use_augs", False)),
+        if_test=bool(cfg.get("if_test", False)),
+        resample_max_tries=int(cfg.get("resample_max_tries", 8)),
+        global_first_train_prob=float(cfg.get("global_first_train_prob", 0.0)),
+        packed_window_train=bool(cfg.get("packed_window_train", False)),
+        num_first_frames=int(cfg.get("num_first_frames", 0)),
+        num_memory_frames=int(cfg.get("num_memory_frames", 0)),
+        num_current_frames=int(cfg.get("num_current_frames", 0)),
+        window_gap_bin_edges=cfg.get("window_gap_bin_edges"),
+        window_gap_probs_start=cfg.get("window_gap_probs_start"),
+        window_gap_probs_end=cfg.get("window_gap_probs_end"),
+        window_gap_curriculum_epochs=cfg.get("window_gap_curriculum_epochs"),
+        paired_frame_event_prob=float(cfg.get("paired_frame_event_prob", 0.0)),
+        paired_temporal_strides=cfg.get("paired_temporal_strides", [1]),
+        paired_temporal_stride_probs=cfg.get("paired_temporal_stride_probs", [1.0]),
+    )
+
+
+def compute_loss(
+    model,
+    criterion,
+    sample,
+    device,
+    iters,
+    autocast_dtype,
+    model_name,
+    reference_model_names,
+    reference_only_train=False,
+):
+    sample = move_batch_to_device(sample, device)
+    queries = sample.query_points if sample.query_points is not None else build_queries(sample.trajectory, sample.visibility)
+    valid = sample.valid if sample.valid is not None else torch.ones_like(sample.visibility, dtype=torch.float32)
+
+    use_amp = (autocast_dtype is not None and device.type == "cuda")
+    with torch.autocast(
+        device_type=device.type,
+        dtype=autocast_dtype if autocast_dtype is not None else torch.float32,
+        enabled=use_amp,
+    ):
+        model_kwargs = dict(
+            iters=iters,
+            img_ifnew=sample.img_ifnew[0],
+            is_train=True,
+        )
+        if model_name in reference_model_names:
+            model_kwargs.update(
+                reference_rgbs=sample.reference_video,
+                reference_events=sample.reference_events,
+                reference_only_train=reference_only_train,
+            )
+        _, _, _, train_data = model(
+            sample.video,
+            sample.events,
+            queries,
+            **model_kwargs,
+        )
+        return criterion(
+            train_data=train_data,
+            gt_trajectory=sample.trajectory,
+            gt_visibility=sample.visibility,
+            gt_valid=valid,
+        )
+
+
 def main():
     args = parse_args()
     cfg = load_config(args.config)
@@ -330,6 +410,11 @@ def main():
     if batch_size != 1:
         raise ValueError("TAPFormer forward currently asserts batch_size == 1. Please set train.batch_size: 1")
 
+    best_metric_name = str(train_cfg.get("best_metric", "loss"))
+    val_root = dataset_cfg.get("val_root", None)
+    if best_metric_name.startswith("val/") and not val_root:
+        raise ValueError("train.best_metric uses val/*, but dataset.val_root is not set.")
+
     save_root = Path(train_cfg.get("save_dir", "output/train_kubric"))
     save_root.mkdir(parents=True, exist_ok=True)
     run_dir = save_root / datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -343,30 +428,7 @@ def main():
     with open(run_dir / "train_args.json", "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
-    dataset = KubricMovifDataset_etap(
-        root_dir=dataset_cfg["data_root"],
-        representation=dataset_cfg.get("representation", "time_surfaces_v2_5"),
-        crop_size=(int(dataset_cfg.get("height", 384)), int(dataset_cfg.get("width", 512))),
-        seq_len=int(dataset_cfg.get("seq_len", 24)),
-        traj_per_sample=int(dataset_cfg.get("traj_per_sample", 128)),
-        sample_vis_1st_frame=bool(dataset_cfg.get("sample_vis_1st_frame", False)),
-        choose_long_point=bool(dataset_cfg.get("choose_long_point", False)),
-        use_augs=bool(dataset_cfg.get("use_augs", False)),
-        if_test=bool(dataset_cfg.get("if_test", False)),
-        resample_max_tries=int(dataset_cfg.get("resample_max_tries", 8)),
-        global_first_train_prob=global_first_train_prob,
-        packed_window_train=bool(dataset_cfg.get("packed_window_train", False)),
-        num_first_frames=int(dataset_cfg.get("num_first_frames", 0)),
-        num_memory_frames=int(dataset_cfg.get("num_memory_frames", 0)),
-        num_current_frames=int(dataset_cfg.get("num_current_frames", 0)),
-        window_gap_bin_edges=dataset_cfg.get("window_gap_bin_edges"),
-        window_gap_probs_start=dataset_cfg.get("window_gap_probs_start"),
-        window_gap_probs_end=dataset_cfg.get("window_gap_probs_end"),
-        window_gap_curriculum_epochs=dataset_cfg.get("window_gap_curriculum_epochs"),
-        paired_frame_event_prob=float(dataset_cfg.get("paired_frame_event_prob", 0.0)),
-        paired_temporal_strides=dataset_cfg.get("paired_temporal_strides", [1]),
-        paired_temporal_stride_probs=dataset_cfg.get("paired_temporal_stride_probs", [1.0]),
-    )
+    dataset = build_kubric_dataset(dataset_cfg, root_key="data_root")
 
     loader = DataLoader(
         dataset,
@@ -378,6 +440,35 @@ def main():
         collate_fn=train_collate,
         drop_last=bool(train_cfg.get("drop_last", True)),
     )
+    val_loader = None
+    if val_root:
+        if not Path(val_root).is_dir():
+            raise ValueError(f"dataset.val_root does not exist or is not a directory: {val_root}")
+        val_dataset = build_kubric_dataset(
+            dataset_cfg,
+            root_key="val_root",
+            overrides={
+                "use_augs": False,
+                "if_test": False,
+                "global_first_train_prob": 0.0,
+                "packed_window_train": False,
+            },
+        )
+        if len(val_dataset.seq_names) == 0:
+            raise ValueError(f"dataset.val_root has no sequence directories: {val_root}")
+        val_num_workers = int(train_cfg.get("val_num_workers", train_cfg.get("num_workers", 4)))
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=val_num_workers,
+            pin_memory=bool(train_cfg.get("pin_memory", True)),
+            persistent_workers=val_num_workers > 0,
+            collate_fn=train_collate,
+            drop_last=False,
+        )
+    elif best_metric_name.startswith("val/"):
+        raise ValueError("train.best_metric uses val/*, but dataset.val_root is not set.")
 
     model = build_model_from_config(model_cfg).to(device)
     print(
@@ -466,7 +557,6 @@ def main():
     save_every_epochs = int(train_cfg.get("save_every_epochs", 1))
     save_last = bool(train_cfg.get("save_last", True))
     save_best = bool(train_cfg.get("save_best", True))
-    best_metric_name = str(train_cfg.get("best_metric", "loss"))
     best_mode = str(train_cfg.get("best_mode", "min")).lower().strip()
     best_filename = best_ckpt_path.name
     best_sign = metric_sign(best_mode)
@@ -482,6 +572,9 @@ def main():
             best_mode = str(ckpt["best_mode"]).lower().strip()
             best_sign = metric_sign(best_mode)
 
+    if best_metric_name.startswith("val/") and val_loader is None:
+        raise ValueError("best_metric uses val/*, but no validation loader is available.")
+
     for epoch in range(start_epoch, epochs):
         dataset.set_epoch(epoch)
         running = {"loss": 0.0, "coord_loss": 0.0, "invisible_coord_loss": 0.0, "visibility_loss": 0.0, "confidence_loss": 0.0}
@@ -491,38 +584,19 @@ def main():
             if not gotit.any():
                 continue
 
-            sample = move_batch_to_device(sample, device)
-            queries = sample.query_points if sample.query_points is not None else build_queries(sample.trajectory, sample.visibility)
-            valid = sample.valid if sample.valid is not None else torch.ones_like(sample.visibility, dtype=torch.float32)
-
             optimizer.zero_grad(set_to_none=True)
-
-            use_amp = (autocast_dtype is not None and device.type == "cuda")
-            with torch.autocast(device_type=device.type, dtype=autocast_dtype if autocast_dtype is not None else torch.float32, enabled=use_amp):
-                model_kwargs = dict(
-                    iters=iters,
-                    img_ifnew=sample.img_ifnew[0],
-                    is_train=True,
-                )
-                if model_name in reference_model_names:
-                    model_kwargs.update(
-                        reference_rgbs=sample.reference_video,
-                        reference_events=sample.reference_events,
-                        reference_only_train=reference_only_train,
-                    )
-                _, _, _, train_data = model(
-                    sample.video,
-                    sample.events,
-                    queries,
-                    **model_kwargs,
-                )
-                loss_dict = criterion(
-                    train_data=train_data,
-                    gt_trajectory=sample.trajectory,
-                    gt_visibility=sample.visibility,
-                    gt_valid=valid,
-                )
-                loss = loss_dict["loss"]
+            loss_dict = compute_loss(
+                model=model,
+                criterion=criterion,
+                sample=sample,
+                device=device,
+                iters=iters,
+                autocast_dtype=autocast_dtype,
+                model_name=model_name,
+                reference_model_names=reference_model_names,
+                reference_only_train=reference_only_train,
+            )
+            loss = loss_dict["loss"]
 
             if precision == "fp16" and device.type == "cuda":
                 scaler.scale(loss).backward()
@@ -566,6 +640,51 @@ def main():
                 )
                 print(msg, flush=True)
 
+        val_metrics = {}
+        if val_loader is not None:
+            model.eval()
+            val_running = {
+                "loss": 0.0,
+                "coord_loss": 0.0,
+                "invisible_coord_loss": 0.0,
+                "visibility_loss": 0.0,
+                "confidence_loss": 0.0,
+            }
+            val_steps = 0
+            with torch.no_grad():
+                for sample, gotit in val_loader:
+                    if not gotit.any():
+                        continue
+                    loss_dict = compute_loss(
+                        model=model,
+                        criterion=criterion,
+                        sample=sample,
+                        device=device,
+                        iters=iters,
+                        autocast_dtype=autocast_dtype,
+                        model_name=model_name,
+                        reference_model_names=reference_model_names,
+                        reference_only_train=False,
+                    )
+                    val_steps += 1
+                    for k in val_running:
+                        val_running[k] += float(loss_dict[k].detach().item())
+            model.train()
+            writer.add_scalar("epoch/val_steps", val_steps, epoch)
+            if val_steps == 0:
+                raise ValueError("Validation produced no valid batches. Please check dataset.val_root.")
+            val_metrics = {f"val/{k}": (val_running[k] / val_steps) for k in val_running}
+            for k, value in val_metrics.items():
+                writer.add_scalar(k, value, epoch)
+            print(
+                f"[Val {epoch}] loss={val_metrics['val/loss']:.4f}, "
+                f"coord={val_metrics['val/coord_loss']:.4f}, "
+                f"inv_coord={val_metrics['val/invisible_coord_loss']:.4f}, "
+                f"vis={val_metrics['val/visibility_loss']:.4f}, "
+                f"conf={val_metrics['val/confidence_loss']:.4f}",
+                flush=True,
+            )
+
         epoch_ckpt = {
             "epoch": epoch,
             "model": model.state_dict(),
@@ -585,6 +704,7 @@ def main():
 
         if n_steps > 0:
             epoch_metrics = {k: (running[k] / n_steps) for k in running}
+            epoch_metrics.update(val_metrics)
             writer.add_scalar("epoch/loss", epoch_metrics["loss"], epoch)
             writer.add_scalar("epoch/coord_loss", epoch_metrics["coord_loss"], epoch)
             writer.add_scalar("epoch/invisible_coord_loss", epoch_metrics["invisible_coord_loss"], epoch)

@@ -2,6 +2,7 @@
 
 dataset:
   data_root: "data/event_kubric/train"
+  val_root: "data/event_kubric/val"
   representation: "time_surfaces_v2_5"
   seq_len: 24
   traj_per_sample: 128
@@ -36,7 +37,7 @@ train:
   save_every_epochs: 0
   save_last: true
   save_best: true
-  best_metric: "loss"
+  best_metric: "val/loss"
   best_mode: "min"
   best_filename: "best.pth"
   precision: "bf16"

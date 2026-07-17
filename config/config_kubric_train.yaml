@@ -3,6 +3,7 @@
 # Dataset settings
 dataset:
   data_root: "data/event_kubric/train"
+  val_root: "data/event_kubric/val"
   representation: "time_surfaces_v2_5"
   seq_len: 24
   traj_per_sample: 128
@@ -18,7 +19,7 @@ train:
   save_dir: "output/train_kubric"
   epochs: 10
   batch_size: 1
-  num_workers: 4
+  num_workers: 8
   shuffle: true
   pin_memory: true
   drop_last: true
@@ -36,7 +37,7 @@ train:
   save_every_epochs: 0   # 0 means disable periodic epoch checkpoints
   save_last: true        # overwrite last.pth after every epoch
   save_best: true        # save best checkpoint during training
-  best_metric: "loss"    # loss | coord_loss | visibility_loss | confidence_loss
+  best_metric: "val/loss"  # loss | val/loss | coord_loss | visibility_loss | confidence_loss
   best_mode: "min"       # min | max
   best_filename: "best.pth"
   precision: "bf16"   # fp32 | fp16 | bf16

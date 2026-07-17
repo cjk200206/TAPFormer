@@ -1,8 +1,8 @@
 # Configuration file for Kubric/ETAP visualization
 
-# ckpt_root: "output/train_kubric/best.pth"
+ckpt_root: "output/train_kubric/20260716_173434/best.pth"
 # ckpt_root: "output/train_kubric/epoch_009.pth"
-ckpt_root: "output/tapformer.pth"
+# ckpt_root: "output/tapformer.pth"
 
 dataset:
   data_root: "data/event_kubric/test"
