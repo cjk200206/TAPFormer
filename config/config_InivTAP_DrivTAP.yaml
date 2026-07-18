@@ -2,7 +2,8 @@
 
 # Dataset paths
 dataset_dir: "data/TAPFormer_Dataset"
-ckpt_root: "output/tapformer.pth"
+# ckpt_root: "output/tapformer.pth"
+ckpt_root: "/remote-home/ums_chenjunkang/TAPFormer/output/train_kubric/20260716_173434/best.pth"
 
 # Test sequences
 eval_datasets:
@@ -51,7 +52,7 @@ drivtap_gt_mode: downsample_even # downsample_even as default
 
 # Visualization and output settings
 visualization:
-  enable: false  # Set to true to enable visualization
+  enable: true  # Set to true to enable visualization
   fps: 20  # FPS for visualization videos
 
 output:

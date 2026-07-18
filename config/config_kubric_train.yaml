@@ -6,11 +6,11 @@ dataset:
   val_root: "data/event_kubric/val"
   representation: "time_surfaces_v2_5"
   seq_len: 24
-  traj_per_sample: 128
+  traj_per_sample: 150
   height: 384
   width: 512
   sample_vis_1st_frame: false
-  choose_long_point: false
+  choose_long_point: true
   use_augs: false
   if_test: false
 
@@ -27,7 +27,7 @@ train:
   weight_decay: 0.0001
   grad_clip_norm: 1.0
   scheduler:
-    enabled: true
+    enabled: false
     type: "cosine"
     warmup_steps: 0
     min_lr: 1.0e-6
