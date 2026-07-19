@@ -1,6 +1,6 @@
 # Configuration file for Kubric/ETAP visualization
 
-ckpt_root: "output/train_kubric/20260716_173434/best.pth"
+ckpt_root: "output/train_kubric/20260718_172125/best.pth"
 # ckpt_root: "output/train_kubric/epoch_009.pth"
 # ckpt_root: "output/tapformer.pth"
 
@@ -29,7 +29,7 @@ model:
 
 predictor:
   input_mode: "fusion"  # fusion | frame | event
-  n_iters: 6
+  n_iters: 4
   grid_size: 0
   local_grid_size: 0
   single_point: false

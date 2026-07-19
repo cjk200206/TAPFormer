@@ -251,27 +251,60 @@ def metric_sign(mode: str):
     raise ValueError(f"Unsupported best_mode={mode}. Use one of: min, max.")
 
 
-def build_scheduler(optimizer, scheduler_cfg, total_steps: int):
+def get_scheduler_type(scheduler_cfg) -> str:
+    if not scheduler_cfg or not bool(scheduler_cfg.get("enabled", False)):
+        return "none"
+    return str(scheduler_cfg.get("type", "cosine")).lower().strip()
+
+
+def get_scheduler_total_steps(scheduler_cfg, total_steps: int) -> int:
+    total_steps = max(1, int(total_steps))
+    scheduler_type = get_scheduler_type(scheduler_cfg)
+    if scheduler_type == "onecycle":
+        return max(1, total_steps + int(scheduler_cfg.get("extra_steps", 0)))
+    if scheduler_type in {"cosine", "none"}:
+        return total_steps
+    raise ValueError(f"Unsupported scheduler.type={scheduler_type}. Use one of: onecycle, cosine")
+
+
+def get_cosine_warmup_steps(scheduler_cfg, total_steps: int) -> int:
+    total_steps = max(1, int(total_steps))
+    if "warmup_steps" in scheduler_cfg:
+        warmup_steps = int(scheduler_cfg.get("warmup_steps", 0))
+    else:
+        warmup_ratio = float(scheduler_cfg.get("warmup_ratio", 0.05))
+        warmup_steps = int(total_steps * warmup_ratio)
+    return max(0, min(warmup_steps, total_steps - 1))
+
+
+def build_scheduler(optimizer, scheduler_cfg, total_steps: int, max_lr: float):
     if not scheduler_cfg or not bool(scheduler_cfg.get("enabled", False)):
         return None
 
-    scheduler_type = str(scheduler_cfg.get("type", "cosine")).lower().strip()
-    if scheduler_type != "cosine":
-        raise ValueError(f"Unsupported scheduler.type={scheduler_type}. Use: cosine")
+    scheduler_type = get_scheduler_type(scheduler_cfg)
 
     step_on = str(scheduler_cfg.get("step_on", "step")).lower().strip()
     if step_on != "step":
         raise ValueError(f"Unsupported scheduler.step_on={step_on}. Use: step")
 
     total_steps = max(1, int(total_steps))
-    if "warmup_steps" in scheduler_cfg:
-        warmup_steps = int(scheduler_cfg.get("warmup_steps", 0))
-    else:
-        warmup_ratio = float(scheduler_cfg.get("warmup_ratio", 0.0))
-        warmup_steps = int(total_steps * warmup_ratio)
-    warmup_steps = max(0, min(warmup_steps, total_steps - 1))
+    if scheduler_type == "onecycle":
+        return torch.optim.lr_scheduler.OneCycleLR(
+            optimizer=optimizer,
+            max_lr=max_lr,
+            total_steps=get_scheduler_total_steps(scheduler_cfg, total_steps),
+            pct_start=float(scheduler_cfg.get("pct_start", 0.05)),
+            anneal_strategy=str(scheduler_cfg.get("anneal_strategy", "cos")),
+            cycle_momentum=bool(scheduler_cfg.get("cycle_momentum", False)),
+            div_factor=float(scheduler_cfg.get("div_factor", 25.0)),
+            final_div_factor=float(scheduler_cfg.get("final_div_factor", 10000.0)),
+        )
 
-    min_lr = float(scheduler_cfg.get("min_lr", 0.0))
+    if scheduler_type != "cosine":
+        raise ValueError(f"Unsupported scheduler.type={scheduler_type}. Use one of: onecycle, cosine")
+
+    warmup_steps = get_cosine_warmup_steps(scheduler_cfg, total_steps)
+    min_lr = float(scheduler_cfg.get("min_lr", 1.0e-6))
     cosine_steps = max(1, total_steps - warmup_steps)
     cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
@@ -282,7 +315,7 @@ def build_scheduler(optimizer, scheduler_cfg, total_steps: int):
     if warmup_steps == 0:
         return cosine_scheduler
 
-    start_factor = 1.0 / float(warmup_steps) if warmup_steps > 1 else 1.0
+    start_factor = float(scheduler_cfg.get("warmup_start_factor", 0.04))
     warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=start_factor,
@@ -293,6 +326,32 @@ def build_scheduler(optimizer, scheduler_cfg, total_steps: int):
         optimizer,
         schedulers=[warmup_scheduler, cosine_scheduler],
         milestones=[warmup_steps],
+    )
+
+
+def log_scheduler_info(scheduler_cfg, total_steps: int, max_lr: float, initial_lr: float, global_step: int):
+    scheduler_type = get_scheduler_type(scheduler_cfg)
+    scheduler_total_steps = get_scheduler_total_steps(scheduler_cfg, total_steps)
+    if scheduler_type == "cosine":
+        warmup_steps = get_cosine_warmup_steps(scheduler_cfg, total_steps)
+        warmup_msg = (
+            f"warmup_steps={warmup_steps}, "
+            f"warmup_start_factor={float(scheduler_cfg.get('warmup_start_factor', 0.04))}"
+        )
+    elif scheduler_type == "onecycle":
+        warmup_msg = f"pct_start={float(scheduler_cfg.get('pct_start', 0.05))}"
+    else:
+        warmup_msg = "disabled"
+    print(
+        "scheduler "
+        f"type={scheduler_type} "
+        f"max_lr={max_lr:.6e} "
+        f"initial_lr={initial_lr:.6e} "
+        f"max_steps={total_steps} "
+        f"scheduler_total_steps={scheduler_total_steps} "
+        f"{warmup_msg} "
+        f"resume_global_step={global_step}",
+        flush=True,
     )
 
 
@@ -498,11 +557,16 @@ def main():
 
     epochs = int(train_cfg.get("epochs", 40))
     scheduler_cfg = train_cfg.get("scheduler", {})
-    total_steps = epochs * len(loader)
+    max_steps_cfg = train_cfg.get("max_steps", None)
+    total_steps = int(max_steps_cfg) if max_steps_cfg is not None else epochs * len(loader)
+    total_steps = max(1, total_steps)
+    scheduler_type = get_scheduler_type(scheduler_cfg)
+    scheduler_total_steps = get_scheduler_total_steps(scheduler_cfg, total_steps)
     scheduler = build_scheduler(
         optimizer=optimizer,
         scheduler_cfg=scheduler_cfg,
         total_steps=total_steps,
+        max_lr=base_lr,
     )
 
     precision = train_cfg.get("precision", "bf16")
@@ -533,8 +597,21 @@ def main():
         model.load_state_dict(model_state, strict=False)
         if "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
-        if scheduler is not None and "scheduler" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler"])
+        ckpt_scheduler_type = ckpt.get("scheduler_type", None)
+        if scheduler is not None:
+            if "scheduler" in ckpt and ckpt["scheduler"] is not None:
+                if ckpt_scheduler_type is None:
+                    print("Warning: checkpoint has scheduler state but no scheduler_type metadata.", flush=True)
+                elif str(ckpt_scheduler_type).lower().strip() != scheduler_type:
+                    raise ValueError(
+                        "Checkpoint scheduler_type does not match current config: "
+                        f"checkpoint={ckpt_scheduler_type}, current={scheduler_type}"
+                    )
+                scheduler.load_state_dict(ckpt["scheduler"])
+            else:
+                print("Warning: checkpoint has no scheduler state; scheduler will start from current config.", flush=True)
+        elif "scheduler" in ckpt and ckpt["scheduler"] is not None:
+            print("Warning: checkpoint has scheduler state but scheduler is disabled in current config.", flush=True)
         start_epoch = int(ckpt.get("epoch", -1)) + 1
         global_step = int(ckpt.get("global_step", 0))
         print(
@@ -542,6 +619,15 @@ def main():
             f"(global_step={global_step})",
             flush=True,
         )
+
+    log_scheduler_info(scheduler_cfg, total_steps, base_lr, get_current_lr(optimizer), global_step)
+    if global_step >= total_steps:
+        print(
+            f"Training already completed: global_step={global_step} >= max_steps={total_steps}",
+            flush=True,
+        )
+        writer.close()
+        return
 
     if precision == "bf16":
         autocast_dtype = torch.bfloat16
@@ -575,12 +661,16 @@ def main():
     if best_metric_name.startswith("val/") and val_loader is None:
         raise ValueError("best_metric uses val/*, but no validation loader is available.")
 
+    should_stop = False
     for epoch in range(start_epoch, epochs):
         dataset.set_epoch(epoch)
         running = {"loss": 0.0, "coord_loss": 0.0, "invisible_coord_loss": 0.0, "visibility_loss": 0.0, "confidence_loss": 0.0}
         n_steps = 0
 
         for sample, gotit in loader:
+            if global_step >= total_steps:
+                should_stop = True
+                break
             if not gotit.any():
                 continue
 
@@ -598,18 +688,23 @@ def main():
             )
             loss = loss_dict["loss"]
 
+            optimizer_updated = True
             if precision == "fp16" and device.type == "cuda":
                 scaler.scale(loss).backward()
                 if grad_clip_norm > 0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+                old_scale = scaler.get_scale()
                 scaler.step(optimizer)
                 scaler.update()
+                optimizer_updated = scaler.get_scale() >= old_scale
             else:
                 loss.backward()
                 if grad_clip_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
                 optimizer.step()
+            if not optimizer_updated:
+                continue
             if scheduler is not None:
                 scheduler.step()
 
@@ -639,6 +734,9 @@ def main():
                     f"conf={running['confidence_loss']/max(1,n_steps):.4f}"
                 )
                 print(msg, flush=True)
+            if global_step >= total_steps:
+                should_stop = True
+                break
 
         val_metrics = {}
         if val_loader is not None:
@@ -690,6 +788,8 @@ def main():
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
+            "scheduler_type": scheduler_type,
+            "scheduler_total_steps": scheduler_total_steps,
             "config": cfg,
             "global_step": global_step,
             "best_metric": best_metric,
@@ -725,6 +825,8 @@ def main():
                     "model": model.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict() if scheduler is not None else None,
+                    "scheduler_type": scheduler_type,
+                    "scheduler_total_steps": scheduler_total_steps,
                     "config": cfg,
                     "global_step": global_step,
                     "best_metric": best_metric,
@@ -753,6 +855,8 @@ def main():
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict() if scheduler is not None else None,
+                "scheduler_type": scheduler_type,
+                "scheduler_total_steps": scheduler_total_steps,
                 "config": cfg,
                 "global_step": global_step,
                 "best_metric": best_metric,
@@ -761,6 +865,17 @@ def main():
                 "best_mode": best_mode,
             }
             torch.save(last_ckpt, run_dir / "last.pth")
+
+        if should_stop:
+            print(f"Reached max_steps={total_steps}; stopping training.", flush=True)
+            break
+
+    if global_step < total_steps:
+        print(
+            f"Warning: training ended at global_step={global_step}, below max_steps={total_steps}. "
+            "Increase train.epochs if this was not intended.",
+            flush=True,
+        )
 
     writer.close()
 

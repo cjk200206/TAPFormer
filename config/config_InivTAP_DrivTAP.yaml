@@ -2,8 +2,8 @@
 
 # Dataset paths
 dataset_dir: "data/TAPFormer_Dataset"
-# ckpt_root: "output/tapformer.pth"
-ckpt_root: "/remote-home/ums_chenjunkang/TAPFormer/output/train_kubric/20260716_173434/best.pth"
+# ckpt_root: "/remote-home/ums_chenjunkang/TAPFormer/output/tapformer.pth"
+ckpt_root: "/remote-home/ums_chenjunkang/TAPFormer/output/train_kubric/20260718_172125/best.pth"
 
 # Test sequences
 eval_datasets:
@@ -36,15 +36,15 @@ hidden_size: 384
 space_depth: 3
 time_depth: 3
 input_mode: "fusion"  # fusion | frame | event
-eval_resolution: [448, 560]
+eval_resolution: [384, 512]
 
 eval_model:
   backend: "tapformer_family"
 
 # Evaluation settings
-# dt: 0.0100
+dt: 0.0100
 grid_size: 0
-n_iters: 5
+n_iters: 4
 dt: auto
 drivtap_gt_mode: downsample_even # downsample_even as default
 # grid_size: 3
@@ -59,3 +59,4 @@ output:
   save_results: false  # Set to true to save results
   save_trajectory: false  # Set to true to save trajectory files
   base_dir: "output/eval_aedat4_subseq"  # Base directory for outputs
+  base_dir: "output/eval_aedat4_subseq_tapformer"  # Base directory for outputs
