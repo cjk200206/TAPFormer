@@ -43,6 +43,7 @@ train:
   pretrained: null    # optional: load model weights only (does not restore optimizer/epoch)
   pretrained_strict: false
   resume: null
+  ddp_find_unused_parameters: True 
 
 # Model settings
 model:

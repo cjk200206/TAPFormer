@@ -3,7 +3,7 @@
 # Dataset paths
 dataset_dir: "data/TAPFormer_Dataset"
 # ckpt_root: "/remote-home/ums_chenjunkang/TAPFormer/output/tapformer.pth"
-ckpt_root: "/remote-home/ums_chenjunkang/TAPFormer/output/train_kubric/20260718_172125/best.pth"
+ckpt_root: "/remote-home/ums_chenjunkang/TAPFormer/output/train_kubric/20260719_235208/best.pth"
 
 # Test sequences
 eval_datasets:
