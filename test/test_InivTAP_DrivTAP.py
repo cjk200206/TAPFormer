@@ -79,6 +79,27 @@ def _write_dataset_summary(base_dir, dataset_name, avg_metrics, avg_time, seq_na
     print(f"Summary saved to {summary_path}")
 
 
+def _get_visualization_video_models(vis_cfg):
+    video_models = vis_cfg.get('video_models')
+    if video_models is None:
+        video_models = [vis_cfg.get('video_model', 'rgb')]
+    elif isinstance(video_models, str):
+        video_models = [video_models]
+    return [str(mode).lower().strip() for mode in video_models]
+
+
+def _to_float_tensor(value):
+    if isinstance(value, torch.Tensor):
+        return value.float()
+    return torch.from_numpy(value).float()
+
+
+def _events_for_visualization(events):
+    if isinstance(events, torch.Tensor):
+        return events.clone().float()
+    return torch.from_numpy(events.copy()).float()
+
+
 def _predict_sequence(predictor, sample):
     predictor_device = getattr(predictor, "device", torch.device(DEFAULT_DEVICE))
     queries = sample.query_points[np.newaxis, ...].to(predictor_device)
@@ -116,6 +137,8 @@ base_output_dir = output_cfg.get('base_dir', 'output/eval_InivTAP_DrivTAP_subseq
 input_mode = config.get('input_mode', 'fusion')
 inference_mode = str(config.get('inference_mode', 'online')).lower().strip()
 eval_backend = str(config.get('eval_model', {}).get('backend', 'tapformer_family')).lower().strip()
+
+visualization_video_models = _get_visualization_video_models(vis_cfg)
 
 # ========== Predictor Initialization ==========
 print("Loading evaluation predictor...")
@@ -259,14 +282,17 @@ for seq_name, dataset_type in EVAL_DATASETS:
     
     # Visualization
     if enable_visualization and vis is not None:
-        vis.visualize(
-            sample.video if isinstance(sample.video, torch.Tensor) else torch.from_numpy(sample.video).float(), 
-            sample.events if isinstance(sample.events, torch.Tensor) else torch.from_numpy(sample.events).float(),
-            pred_trajectory, 
-            pred_visibility > 0.8,
-            filename=seq_name,
-            video_model="rgb",
-        )
+        video_tensor = _to_float_tensor(sample.video)
+        for video_model in visualization_video_models:
+            event_tensor = _events_for_visualization(sample.events)
+            vis.visualize(
+                video_tensor,
+                event_tensor,
+                pred_trajectory,
+                pred_visibility > 0.8,
+                filename=f"{seq_name}_{video_model}",
+                video_model=video_model,
+            )
     
     # Save trajectory if requested
     if save_trajectory:

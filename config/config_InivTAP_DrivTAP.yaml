@@ -2,8 +2,8 @@
 
 # Dataset paths
 dataset_dir: "data/TAPFormer_Dataset"
-# ckpt_root: "/remote-home/ums_chenjunkang/TAPFormer/output/tapformer.pth"
-ckpt_root: "/remote-home/ums_chenjunkang/TAPFormer/output/train_kubric/20260719_235208/best.pth"
+ckpt_root: "/remote-home/ums_chenjunkang/TAPFormer/output/tapformer.pth"
+# ckpt_root: "/remote-home/ums_chenjunkang/TAPFormer/output/train_kubric/20260719_235208/best.pth"
 
 # Test sequences
 eval_datasets:
@@ -54,9 +54,10 @@ drivtap_gt_mode: downsample_even # downsample_even as default
 visualization:
   enable: true  # Set to true to enable visualization
   fps: 20  # FPS for visualization videos
+  video_models: ["rgb", "events"]
 
 output:
   save_results: false  # Set to true to save results
   save_trajectory: false  # Set to true to save trajectory files
-  base_dir: "output/eval_aedat4_subseq"  # Base directory for outputs
+  # base_dir: "output/eval_aedat4_subseq"  # Base directory for outputs
   base_dir: "output/eval_aedat4_subseq_tapformer"  # Base directory for outputs

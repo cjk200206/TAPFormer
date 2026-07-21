@@ -265,7 +265,10 @@ def build_eval_model_from_config(model_cfg, inference_mode="online"):
             raise ValueError(
                 "inference_mode=cowtracker_windowed only supports tapformer_cow_dense / cow_dense."
             )
-        return TAPFormer_online(**common_kwargs)
+        return TAPFormer_online(
+            frontend_type=str(model_cfg.get("frontend_type", "base")),
+            **common_kwargs,
+        )
 
     if model_name in _COW_DENSE_MODEL_NAMES:
         cow_kwargs = _get_cow_model_kwargs(model_cfg)

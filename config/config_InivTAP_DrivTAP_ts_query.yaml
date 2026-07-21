@@ -1,0 +1,59 @@
+# Configuration file for Aedat4 dataset evaluation with TSANet-style query frontend
+
+# Dataset paths
+dataset_dir: "data/TAPFormer_Dataset"
+ckpt_root: "/remote-home/ums_chenjunkang/TAPFormer/output/train_kubric_ts_query/20260720_211619/best.pth"
+
+# Test sequences
+eval_datasets:
+  # InivTAP
+  - ["ID_Fast_Fruit", "InivTAP"]
+  - ["ID_Dark_Fruit", "InivTAP"]
+  - ["ID_Fast_Hand", "InivTAP"]
+  - ["ID_OverExp_Fruit", "InivTAP"]
+  - ["ID_OverExp_Fruit2", "InivTAP"]
+  - ["ID_Dynamic_Robot", "InivTAP"]
+  - ["OD_Dynamic", "InivTAP"]
+  - ["OD_Static", "InivTAP"]
+  - ["OD_Basketball", "InivTAP"]
+  # DrivTAP
+  - ["Day_Tunnel", "DrivTAP"]
+  - ["Day_Bridge", "DrivTAP"]
+  - ["Day_Fast", "DrivTAP"]
+  - ["Night_Road", "DrivTAP"]
+  - ["Night_Fast", "DrivTAP"]
+
+# Model configuration
+representation: "time_surfaces_v2_5"
+stride: 4
+corr_levels: 3
+backbone: "basic"
+window_size: 16
+corr_radius: 3
+hidden_size: 384
+space_depth: 3
+time_depth: 3
+frontend_type: "ts_query"
+input_mode: "fusion"  # fusion | frame | event
+eval_resolution: [384, 512]
+
+eval_model:
+  backend: "tapformer_family"
+
+# Evaluation settings
+inference_mode: "online"
+dt: auto
+drivtap_gt_mode: downsample_even
+grid_size: 0
+n_iters: 4
+
+# Visualization and output settings
+visualization:
+  enable: true
+  fps: 20
+  video_models: ["rgb", "events"]
+
+output:
+  save_results: false
+  save_trajectory: false
+  base_dir: "output/eval_aedat4_subseq_tapformer_ts_query"
