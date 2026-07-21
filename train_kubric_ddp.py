@@ -312,7 +312,8 @@ def main():
         rank0_print(
             rank,
             f"model.name={model_cfg.get('name', 'tapformer')} "
-            f"feature_mode={model_cfg.get('feature_mode', 'fusion')}",
+            f"feature_mode={model_cfg.get('feature_mode', 'fusion')} "
+            f"frontend_type={model_cfg.get('frontend_type', 'base')}",
             flush=True,
         )
 

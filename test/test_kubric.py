@@ -7,7 +7,7 @@ Usage:
 
 import argparse
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import sys
 from pathlib import Path
 
@@ -260,8 +260,14 @@ def build_model_from_config(model_cfg, inference_mode="online"):
             return TAPFormerCowDense_windowed(**cow_kwargs)
         return TAPFormerCowDense_online(**cow_kwargs)
     if inference_mode == "offline":
-        return TAPFormer(**common_kwargs)
-    return TAPFormer_online(**common_kwargs)
+        return TAPFormer(
+            frontend_type=str(model_cfg.get("frontend_type", "base")),
+            **common_kwargs,
+        )
+    return TAPFormer_online(
+        frontend_type=str(model_cfg.get("frontend_type", "base")),
+        **common_kwargs,
+    )
 
 
 def main():

@@ -15,7 +15,8 @@ starter1, ender1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable
 
 class TAPFormer_online(TAPFormer):
     def __init__(self, trained_model=None, window_size=16, stride=4, corr_radius=3, corr_levels=3, 
-                 backbone="basic", num_heads=8, hidden_size=384, space_depth=3, time_depth=3):
+                 backbone="basic", num_heads=8, hidden_size=384, space_depth=3, time_depth=3,
+                 frontend_type="base"):
         """
         Initialize TAPFormer_online model for memory-efficient inference.
         
@@ -34,7 +35,8 @@ class TAPFormer_online(TAPFormer):
                 backbone=trained_model.backbone,
                 hidden_size=trained_model.hidden_size,
                 space_depth=trained_model.space_depth,
-                time_depth=trained_model.time_depth
+                time_depth=trained_model.time_depth,
+                frontend_type=getattr(trained_model, "frontend_type", "base")
             )
             self.fusion_block = trained_model.fusion_block
             self.updateformer2 = trained_model.updateformer2
@@ -50,7 +52,8 @@ class TAPFormer_online(TAPFormer):
                 num_heads=num_heads,
                 hidden_size=hidden_size,
                 space_depth=space_depth,
-                time_depth=time_depth
+                time_depth=time_depth,
+                frontend_type=frontend_type
             )
         
         time_grid = torch.linspace(0, self.window_size - 1, self.window_size).reshape(1, self.window_size, 1)
@@ -153,7 +156,7 @@ class TAPFormer_online(TAPFormer):
             
             dtype = rgbs_seq.dtype
             
-            if fmaps_fusion is None:
+            if fmaps_fusion is None or self.frontend_type in {"ts_query", "time_surface_query"}:
                 fmaps_pyramid = self.fusion_block(rgbs_seq, events_seq, img_ifnew_seq if img_ifnew is not None else None)
                 
                 if isinstance(fmaps_pyramid, list):

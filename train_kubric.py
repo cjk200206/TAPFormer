@@ -120,7 +120,10 @@ def build_model_from_config(model_cfg):
     )
     model_name = str(model_cfg.get("name", "tapformer")).lower().strip()
     if model_name == "tapformer":
-        return TAPFormer(**common_kwargs)
+        return TAPFormer(
+            frontend_type=str(model_cfg.get("frontend_type", "base")),
+            **common_kwargs,
+        )
     if model_name in {"tapformer_ablation", "ablation"}:
         return TAPFormerAblation(
             feature_mode=model_cfg.get("feature_mode", "fusion"),
@@ -532,7 +535,8 @@ def main():
     model = build_model_from_config(model_cfg).to(device)
     print(
         f"model.name={model_cfg.get('name', 'tapformer')} "
-        f"feature_mode={model_cfg.get('feature_mode', 'fusion')}",
+        f"feature_mode={model_cfg.get('feature_mode', 'fusion')} "
+        f"frontend_type={model_cfg.get('frontend_type', 'base')}",
         flush=True,
     )
 

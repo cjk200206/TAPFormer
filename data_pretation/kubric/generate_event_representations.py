@@ -4,7 +4,6 @@ import os
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from multiprocessing import Pool
 import re
 from typing import List, Optional
 
@@ -31,7 +30,6 @@ from LFE_TAP.utils.event.utils import load_events_h5_columns
 
 IMG_H = 512
 IMG_W = 512
-VOXEL_GRID_CONSTRUCTOR = VoxelGrid((5, 512, 512), True)
 
 def blosc_opts(complevel=1, complib="blosc:zstd", shuffle="byte"):
     if hdf5plugin is None:
@@ -417,6 +415,7 @@ def generate_voxel_grid_single(input_seq_dir, output_dir, visualize=False, n_bin
         return
 
     dt_us = 1 / 48 * 1e6
+    voxel_grid_constructor = VoxelGrid((n_bins, IMG_H, IMG_W), True)
     x, y, p, time = _load_sorted_events(input_seq_dir / "events.h5")
 
     for i in range(1, 96, 1):
@@ -426,7 +425,7 @@ def generate_voxel_grid_single(input_seq_dir, output_dir, visualize=False, n_bin
         mask_t = np.logical_and(time > t0, time <= t1)
         x_bin, y_bin, p_bin, t_bin = x[mask_t], y[mask_t], p[mask_t], time[mask_t]
         curr_voxel_grid = events_to_voxel_grid(
-            VOXEL_GRID_CONSTRUCTOR, p_bin, t_bin, x_bin, y_bin
+            voxel_grid_constructor, p_bin, t_bin, x_bin, y_bin
         )
         curr_voxel_grid = curr_voxel_grid.numpy()
         curr_voxel_grid = np.transpose(curr_voxel_grid, (1, 2, 0))
@@ -515,7 +514,8 @@ def repeat_process(
                 print(f"Error occurred with input sequence directory: {task[1]}. Error: {err}")
         return
 
-    with Pool(processes=num_workers) as pool:
+    multiprocessing_context = multiprocessing.get_context("spawn")
+    with multiprocessing_context.Pool(processes=num_workers) as pool:
         for input_seq, ok, err in tqdm(
             pool.imap_unordered(_generate_one_sequence, tasks),
             total=len(tasks),

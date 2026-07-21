@@ -11,7 +11,7 @@ from LFE_TAP.models.blocks import (
     UpdateFormer,
     Mlp,
 )
-from LFE_TAP.models.fusionFormer import Fusionformer
+from LFE_TAP.models.fusionFormer import Fusionformer, TimeSurfaceQueryFrontend
 from LFE_TAP.utils.model_utils import get_track_feat, bilinear_sampler, get_support_points
 from LFE_TAP.models.embeddings import get_1d_sincos_pos_embed_from_grid
 
@@ -42,7 +42,7 @@ def posenc(x, min_deg, max_deg):
 
 
 class TAPFormer(nn.Module):
-    def __init__(self, window_size=16, stride=8, corr_radius=3, corr_levels=3, backbone="basic", num_heads=8, hidden_size=384, space_depth=3, time_depth=3):
+    def __init__(self, window_size=16, stride=8, corr_radius=3, corr_levels=3, backbone="basic", num_heads=8, hidden_size=384, space_depth=3, time_depth=3, frontend_type="base"):
         super(TAPFormer, self).__init__()
         self.window_size = window_size
         self.stride = stride
@@ -58,8 +58,22 @@ class TAPFormer(nn.Module):
         self.input_dim = 2 + 84 + self.mlp_output_dim * self.corr_levels
         num_virtual_tracks = 32
         
-
-        self.fusion_block = Fusionformer(image_size=self.model_resolution, out_dim=self.latent_dim, mlp_dim=512, stride=self.stride, depth=2)
+        self.frontend_type = str(frontend_type).lower().strip()
+        frontend_kwargs = dict(
+            image_size=self.model_resolution,
+            out_dim=self.latent_dim,
+            mlp_dim=512,
+            stride=self.stride,
+            depth=2,
+        )
+        if self.frontend_type == "base":
+            self.fusion_block = Fusionformer(**frontend_kwargs)
+        elif self.frontend_type in {"ts_query", "time_surface_query"}:
+            self.fusion_block = TimeSurfaceQueryFrontend(**frontend_kwargs)
+        else:
+            raise ValueError(
+                f"Unsupported frontend_type={frontend_type}. Use one of: base, ts_query."
+            )
         self.updateformer2 = EfficientUpdateFormer(
             space_depth=space_depth,
             time_depth=time_depth,
@@ -174,7 +188,7 @@ class TAPFormer(nn.Module):
             conf_preds.append(conf[..., 0])
         return coord_preds, vis_preds, conf_preds
     
-    def forward(self, rgbs, events, queries, iters=4, img_ifnew=None, feat_init=None, is_train=False):
+    def forward(self, rgbs, events, queries, iters=4, img_ifnew=None, feat_init=None, is_train=False, voxel_events=None):
         B, T, C, H, W = events.shape
         B, N, _ = queries.shape
         _, _, C_img, _, _ = rgbs.shape
@@ -201,7 +215,29 @@ class TAPFormer(nn.Module):
         dtype = rgbs.dtype
         
         # fusion event and image to get fusion feature
-        fmaps_out = self.fusion_block(rgbs.reshape(-1, C_img, H, W), events.reshape(-1, C, H, W), img_ifnew)
+        rgbs_flat = rgbs.reshape(-1, C_img, H, W)
+        events_flat = events.reshape(-1, C, H, W)
+        if self.frontend_type in {"ts_query", "time_surface_query"}:
+            voxel_events_flat = None
+            if voxel_events is not None:
+                if voxel_events.dim() == 5:
+                    _, _, C_voxel, H_voxel, W_voxel = voxel_events.shape
+                    if (H_voxel, W_voxel) != (H, W):
+                        raise ValueError("voxel_events must match events spatial size.")
+                    voxel_events_flat = voxel_events.reshape(-1, C_voxel, H_voxel, W_voxel).to(
+                        device=events.device,
+                        dtype=events.dtype,
+                    )
+                else:
+                    voxel_events_flat = voxel_events.to(device=events.device, dtype=events.dtype)
+            fmaps_out = self.fusion_block(
+                rgbs_flat,
+                events_flat,
+                img_ifnew,
+                voxel_events=voxel_events_flat,
+            )
+        else:
+            fmaps_out = self.fusion_block(rgbs_flat, events_flat, img_ifnew)
 
         # compute queries point feature
         fmaps_pyramid = []
